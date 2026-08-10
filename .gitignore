@@ -1,0 +1,6 @@
+﻿node_modules/
+.env
+data/session/
+data/queue/
+logs/
+playwright-report/

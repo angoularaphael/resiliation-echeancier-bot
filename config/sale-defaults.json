@@ -1,0 +1,27 @@
+{
+  "abonnement": {
+    "sale_type": "abonnement",
+    "requires_payment": true,
+    "requires_iban": true,
+    "paiement_comptant": false,
+    "payment_mode": "virement",
+    "currency": "EUR"
+  },
+  "carte": {
+    "sale_type": "carte",
+    "requires_payment": true,
+    "requires_iban": true,
+    "paiement_comptant": false,
+    "prelevement_delay_days": 3,
+    "prelevement_delay_days_min": 3,
+    "prelevement_delay_days_max": 3,
+    "payment_mode": "virement",
+    "currency": "EUR"
+  },
+  "none": {
+    "sale_type": "none",
+    "requires_payment": false,
+    "requires_iban": false,
+    "create_sale": false
+  }
+}

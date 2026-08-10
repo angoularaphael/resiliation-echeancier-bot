@@ -1,0 +1,98 @@
+{
+  "source_session": "coach-screenshots-2026-06-28",
+  "urls": {
+    "login": "/index.php",
+    "choose_zone": "/nextgen/choose-zone",
+    "members_search": "/select.php",
+    "member_detail": "/joueurs.php",
+    "member_check": "/check.php",
+    "sale_abo": "/nextgen/vente",
+    "rib_page": "RIB membre"
+  },
+  "quick_search_selectors": {
+    "nom": "#i_nom, input[name=\"nom\"]",
+    "prenom": "#i_prenom, input[name=\"prenom\"]",
+    "email": "#i_email, input[name=\"email\"]",
+    "tel": "#i_tel, input[name=\"tel\"]",
+    "new_button": "#buttonNew, input#buttonNew"
+  },
+  "member_form_selectors": {
+    "nom": "input[name=\"nom\"]",
+    "prenom": "input[name=\"prenom\"]",
+    "email": "input[name=\"email\"]",
+    "date_naissance": "input[name=\"date_naissance\"]",
+    "sexe": "select[name=\"sexe\"]",
+    "telsms": "input[name=\"telsms\"]",
+    "tel": "input[name=\"tel\"]",
+    "adr1": "input[name=\"adr1\"]",
+    "codepostal": "input[name=\"codepostal\"]",
+    "ville": "input[name=\"ville\"]",
+    "pays": "input[name=\"pays\"], select[name=\"pays\"]",
+    "utm_source": "input[name=\"utm_source\"]",
+    "utm_medium": "input[name=\"utm_medium\"]",
+    "utm_campaign": "input[name=\"utm_campaign\"]",
+    "info_compta": "input[name=\"info_compta\"]",
+    "info_admin": "textarea[name=\"info_admin\"]",
+    "idz": "select[name=\"idz\"]",
+    "submit": "form[name=\"db1_form\"] input[type=\"submit\"][value=\"Valider\"], input[type=\"submit\"].albut_dw[value=\"Valider\"], input[type=\"submit\"][value=\"Valider\"]"
+  },
+  "member_detail": {
+    "fiche_detaillee_link": "a:has-text(\"Fiche détaillée\"), text=Fiche détaillée",
+    "update_button": "input[type=\"submit\"].albut_dw:has-text(\"Mettre à jour\"), button:has-text(\"Mettre à jour\"), input.albut_dw[value=\"Mettre à jour\"]",
+    "validate_button": "input[type=\"submit\"].albut_dw:has-text(\"Valider\"), button:has-text(\"Valider\")",
+    "saisir_rib_button": "button:has-text(\"Saisir RIB\"), a:has-text(\"Saisir RIB\"), text=Saisir RIB"
+  },
+  "rib_form": {
+    "iban": "input[name=\"iban\"]",
+    "bic": "input[name=\"bic\"]",
+    "account_holder": "input[name=\"nom\"]",
+    "address": "input[name=\"adr_line1\"]",
+    "address2": "input[name=\"adr_line2\"]",
+    "city": "input[name=\"adr_town\"]",
+    "zip": "input[name=\"adr_postcode\"]",
+    "country": "input[name=\"adr_country\"]",
+    "save": "input[type=\"submit\"][value=\"Valider\"]"
+  },
+  "member_check": {
+    "achat_abonnement": "input.fichemembre_button[value=\"Achat Abonnement\"], input[type=\"button\"][value=\"Achat Abonnement\"], button:has-text(\"Achat Abonnement\"), a:has-text(\"Achat Abonnement\")",
+    "achat_carte": "input.fichemembre_button[value=\"Achat Carte\"], input[type=\"button\"][value=\"Achat Carte\"], button:has-text(\"Achat Carte\"), a:has-text(\"Achat Carte\")",
+    "saisir_mandat_sepa": "button:has-text(\"Saisir mandat SEPA\"), input[value*=\"mandat SEPA\"], text=Saisir mandat SEPA",
+    "consulter_abo": "input.fichemembre_button_grey[value=\"Consulter\"], input[value=\"Consulter\"].fichemembre_button_grey, button:has-text(\"Consulter\")",
+    "prestation_item": "div.og-product-item[id^=\"prestation_\"], div[id^=\"prestation_\"].og-product-item",
+    "product_search": "input[placeholder*=\"Rechercher un produit\"], input[placeholder*=\"produit\"]"
+  },
+  "sale_config_modal": {
+    "paiement_comptant_toggle": "text=Paiement Comptant",
+    "paiement_comptant_el_switch": ".el-switch:has(+ span:has-text(\"Paiement Comptant\")), span:has-text(\"Paiement Comptant\") >> xpath=following::div[contains(@class,\"el-switch\")][1]",
+    "paiement_comptant_el_switch_core": ".el-switch__core",
+    "valide_du_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][1] >> input",
+    "valide_au_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][2] >> input",
+    "saisir_rib": "button:has-text(\"Saisir le RIB\"), text=Saisir le RIB",
+    "appliquer": "button.ari-button-filled:has-text(\"Appliquer\"), button.ari-button:has-text(\"Appliquer\"), button:has-text(\"Appliquer\")",
+    "modifier_date_fin": "button:has-text(\"Modifier la date de fin\"), a:has-text(\"Modifier la date de fin\")",
+    "date_fin_input": "text=/Date de fin/i >> xpath=following::input[1]",
+    "conserver_duree": "label:has-text(\"Conserver la durée\") input[type=\"checkbox\"]",
+    "action_modifier": "select:has(option:has-text(\"Modifier\"))",
+    "ignorer_continuer": "button:has-text(\"Ignorer et continuer\")",
+    "badge_config_title": "text=/Configuration de Badge/i",
+    "valide_du_input": ":text(\"Valide du\") >> xpath=following::input[1]",
+    "valide_au_input": ":text(\"Valide du\") >> xpath=following::input[2]",
+    "valide_au_alt": ":text-is(\"au\") >> xpath=following::input[1]"
+  },
+  "payment_finalize": {
+    "virement": "button:has-text(\"Virement\"), text=Virement",
+    "carte_bancaire": "button:has-text(\"Carte Bancaire\"), text=Carte Bancaire",
+    "terminer": "button:has-text(\"Terminer\"), text=Terminer, .verticalDocumentBar:has-text(\"Terminer\"), [class*=\"verticalDocumentBar\"]:has-text(\"Terminer\"), div.col-auto:has-text(\"Terminer\")",
+    "cloturer": "button:has-text(\"Clôturer\"), text=Clôturer, .paymentModes-caisse-free:has-text(\"Clôturer\"), div:has-text(\"Clôturer la note\")",
+    "modifier_date_fin_popup": "button.p-button:has-text(\"Modifier la date de fin\"), button[aria-label=\"Modifier la date de fin\"], button:has-text(\"Modifier la date de fin\")"
+  },
+  "contract_actions": {
+    "resilier": "text=Résilier, div.iconify:has-text(\"Résilier\"), [aria-label=\"Résilier\"]",
+    "motif_ne_souhaite_pas_reconduire": "text=Ne souhaite pas reconduire, .el-select-dropdown__item:has-text(\"Ne souhaite pas reconduire\")",
+    "appliquer_quitter": "button.ari-button-filled:has-text(\"Appliquer et Quitter\"), button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter",
+    "envoyer_mail_resiliation": "text=Envoyer un mail de résiliation, label:has-text(\"Envoyer un mail de résiliation\")",
+    "confirmer_resiliation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer",
+    "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail",
+    "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
+  }
+}

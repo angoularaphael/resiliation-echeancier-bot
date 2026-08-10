@@ -1,0 +1,36 @@
+{
+  "minimes": {
+    "label": "Boxing Center Minimes",
+    "deciplus_label": "Minimes",
+    "deciplus_zone_id": "2",
+    "address": "12 rue de Fenouillet, 31200 Toulouse"
+  },
+  "ramonville": {
+    "label": "Boxing Center Ramonville",
+    "deciplus_label": "Ramonville",
+    "address": "33 rue des Ormes, 31530 Ramonville"
+  },
+  "st-cyprien": {
+    "label": "Boxing Center St-Cyprien",
+    "deciplus_label": "St-Cyprien",
+    "address": "11 Rue Sainte-Lucie, 31300 Toulouse"
+  },
+  "etats-unis": {
+    "label": "Boxing Center États-Unis",
+    "deciplus_label": "Minimes",
+    "deciplus_zone_id": "2",
+    "contract_label": "États-Unis",
+    "address": "388 avenue des États-Unis, 31200 Toulouse"
+  },
+  "balma": {
+    "label": "Boxing Center Balma",
+    "deciplus_label": "Balma",
+    "deciplus_zone_id": "1",
+    "address": "8 rue Théron de Montaugé, 31200 Toulouse"
+  },
+  "portet": {
+    "label": "Boxing Center Portet",
+    "deciplus_label": "Portet",
+    "address": "Portet-sur-Garonne"
+  }
+}
