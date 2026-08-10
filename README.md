@@ -11,10 +11,11 @@ Ventes / inscriptions restent sur `boxi-deci-bot` (`BOXPLUS_BOT_URL`).
 
 ## Déploiement
 
-1. Copier `env.bothosting` → `.env` sur BotHosting
-2. `BOT_REPO_URL=https://github.com/angoularaphael/resiliation-echeancier-bot.git`
-3. Démarrer `node bootstrap.js`
-4. Vercel : `BOXPLUS_BOT_URL_OPS=http://prem-eu2.bot-hosting.net:21268`
+1. Copier `env.bothosting.example` → `.env` sur BotHosting (jamais committer `.env` / `env.bothosting`)
+2. Remplir `DECIPLUS_*`, `DECIPLUS_IMAP_*`, `SYNC_SECRET`
+3. `BOT_REPO_URL=https://github.com/angoularaphael/resiliation-echeancier-bot.git`
+4. Démarrer `node bootstrap.js`
+5. Vercel : `BOXPLUS_BOT_URL_OPS=http://prem-eu2.bot-hosting.net:21268`
 
 Scan manuel : `POST /api/echeancier/scan` avec header `x-sync-secret`.
 
