@@ -26,35 +26,57 @@ function isEligibleContractLabel(label) {
 
 async function openEcheancierImpayes(page) {
   const origin = new URL(page.url()).origin;
-  // Tentative URL directe nextgen, sinon navigation menu
   const candidates = [
+    'nextgen/manager/payments-schedules',
+    'nextgen/presta_echeance.php',
+    'nextgen/legacy?path=' + encodeURIComponent('/presta_echeance.php'),
     'nextgen/manager/echeancier',
     'nextgen/echeancier',
-    'manager/echeancier',
   ];
   let opened = false;
   for (const rel of candidates) {
-    await page.goto(new URL(rel, origin).href, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(800);
-    const has = await page.locator('text=/échéancier|echeancier|impay/i').first().isVisible().catch(() => false);
-    if (has) {
+    await page
+      .goto(new URL(rel, origin + '/').href, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45000,
+      })
+      .catch(() => {});
+    await page.waitForTimeout(1000);
+    const url = page.url();
+    const has =
+      /payments-schedules|presta_echeance|ech[eé]ancier/i.test(url) ||
+      (await page
+        .locator('text=/échéancier|echeancier|impay|payments.?schedules/i')
+        .first()
+        .isVisible()
+        .catch(() => false));
+    if (has && !/acces_interdit/i.test(url)) {
       opened = true;
+      logInfo('Échéancier ouvert', { url });
       break;
     }
   }
+
   if (!opened) {
-    // Menu Manager
-    const manager = page.getByRole('link', { name: /manager/i }).first();
+    // Menu Manager → Echéanciers V2 / Echéanciers
+    await page.goto(new URL('nextgen/', origin + '/').href, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.waitForTimeout(800);
+    const manager = page.getByText(/^Manager$/i).first();
     if ((await manager.count()) > 0) {
-      await manager.click().catch(() => {});
-      await page.waitForTimeout(600);
+      await manager.hover().catch(() => {});
+      await page.waitForTimeout(500);
     }
-    const echeancier = page.getByRole('link', { name: /échéancier|echeancier/i }).first();
+    const echeancier = page
+      .locator('a[href*="payments-schedules"], a[href*="presta_echeance"]')
+      .or(page.getByRole('link', { name: /éch[eé]anciers?\s*v2|éch[eé]anciers?/i }))
+      .first();
     if ((await echeancier.count()) === 0) {
       throw new Error('Menu Échéancier introuvable');
     }
     await echeancier.click();
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1200);
+    opened = true;
+    logInfo('Échéancier ouvert via menu', { url: page.url() });
   }
 
   // Tous les états → Impayés → Appliquer
@@ -62,18 +84,28 @@ async function openEcheancierImpayes(page) {
   if ((await allStates.count()) > 0) await allStates.click().catch(() => {});
   await page.waitForTimeout(400);
 
-  const unpaid = page.locator('label:has-text("Impay"), text=/^Impay/i, [title*="Impay"]').first();
-  if ((await unpaid.count()) > 0) {
-    await unpaid.click({ force: true }).catch(() => {});
-  } else {
-    // checkbox / option
-    await page.locator('text=/Impayé|Impayes|Impayés/i').first().click({ force: true }).catch(() => {});
+  const unpaidCandidates = [
+    page.getByText(/^Impay/i).first(),
+    page.locator('label').filter({ hasText: /Impay/i }).first(),
+    page.locator('[title*="Impay" i]').first(),
+    page.locator('input[value*="Impay" i]').first(),
+  ];
+  for (const unpaid of unpaidCandidates) {
+    if ((await unpaid.count()) > 0 && (await unpaid.isVisible().catch(() => false))) {
+      await unpaid.click({ force: true }).catch(() => {});
+      break;
+    }
   }
   await page.waitForTimeout(300);
 
-  const apply = page.getByRole('button', { name: /appliquer|filtrer|valider/i }).first();
+  const apply = page.getByRole('button', { name: /appliquer|filtrer|valider|rechercher/i }).first();
   if ((await apply.count()) > 0) await apply.click().catch(() => {});
-  else await page.locator('input[type="submit"][value*="Appliquer"], button:has-text("Appliquer")').first().click().catch(() => {});
+  else
+    await page
+      .locator('input[type="submit"][value*="Appliquer"], button:has-text("Appliquer")')
+      .first()
+      .click()
+      .catch(() => {});
   await page.waitForTimeout(1500);
 }
 
