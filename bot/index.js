@@ -291,7 +291,14 @@ async function processCancelJob(page, order) {
 
   let memberId = order.deciplus_member_id || null;
   if (!memberId && (identity.first_name || identity.last_name)) {
-    const match = await findMemberByIdentity(page, identity);
+    const { CHANGE_MATCH_FIELDS } = require('./member');
+    const cancelReason = String(order.cancel_reason || '').toLowerCase();
+    // Changement d’abo : même règle que verify_identity (nom/prénom/naissance, pas téléphone)
+    const matchFields =
+      cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_')
+        ? CHANGE_MATCH_FIELDS
+        : undefined;
+    const match = await findMemberByIdentity(page, identity, { matchFields });
     if (!match.found) {
       await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
       return {
