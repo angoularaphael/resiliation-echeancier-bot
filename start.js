@@ -52,4 +52,9 @@ try {
   process.exit(1);
 }
 
-require('./bot/index.js');
+const bot = require('./bot/index.js');
+const once = process.argv.includes('--once');
+bot.runLoop(once).catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
