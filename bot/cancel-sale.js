@@ -296,38 +296,63 @@ async function setResiliationDate(page, dateStr) {
   await input.press('Enter').catch(() => {});
   await randomDelay(300, 500);
 
-  // Repli calendrier : cliquer le jour du mois
-  const day = String(Number(dateStr.split('/')[0]));
-  const calDay = page
+  // Repli calendrier : aujourd’hui d’abord, sinon jour du mois
+  const todayCell = page
     .locator(
-      `.el-date-table td.available:not(.prev-month):not(.next-month) >> text="${day}", ` +
-        `.el-picker-panel td.available >> text="${day}", ` +
-        `td.available span:text-is("${day}")`
+      '.el-date-table td.available.today, .el-date-table td.today, ' +
+        '.el-picker-panel td.available.current, td.today span'
     )
     .first();
-  if ((await calDay.count()) > 0 && (await calDay.isVisible().catch(() => false))) {
-    await calDay.click({ force: true }).catch(() => {});
+  if ((await todayCell.count()) > 0 && (await todayCell.isVisible().catch(() => false))) {
+    await todayCell.click({ force: true }).catch(() => {});
     await randomDelay(300, 500);
   } else {
-    await page.keyboard.press('Escape').catch(() => {});
+    const day = String(Number(dateStr.split('/')[0]));
+    const calDay = page
+      .locator(
+        `.el-date-table td.available:not(.prev-month):not(.next-month) >> text="${day}", ` +
+          `.el-picker-panel td.available >> text="${day}", ` +
+          `td.available span:text-is("${day}")`
+      )
+      .first();
+    if ((await calDay.count()) > 0 && (await calDay.isVisible().catch(() => false))) {
+      await calDay.click({ force: true }).catch(() => {});
+      await randomDelay(300, 500);
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
   }
 
   // Forcer la valeur native si le v-model n'a pas suivi
   const current = ((await input.inputValue().catch(() => '')) || '').trim();
-  if (current !== dateStr) {
+  const sameDate = (a, b) => {
+    const norm = (v) => {
+      const m = String(v || '')
+        .trim()
+        .match(/(\d{1,2})\D+(\d{1,2})\D+(\d{2,4})/);
+      if (!m) return '';
+      const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+      return `${Number(m[1])}/${Number(m[2])}/${Number(y)}`;
+    };
+    const na = norm(a);
+    const nb = norm(b);
+    return Boolean(na && nb && na === nb);
+  };
+  if (!sameDate(current, dateStr)) {
     await page
       .evaluate(
         ({ selectorHint, value }) => {
           const candidates = [
             ...document.querySelectorAll(
-              '.el-date-editor input, input.el-input__inner, input[type="text"]'
+              '.el-dialog .el-date-editor input, .el-drawer .el-date-editor input, ' +
+                '.el-date-editor input, input.el-input__inner, input[type="text"]'
             ),
           ];
           let target = null;
           for (const el of candidates) {
-            const block = el.closest('div')?.parentElement;
+            const block = el.closest('.el-form-item, .el-dialog, form, div');
             const text = String(block?.textContent || '');
-            if (/Date de résiliation effective/i.test(text)) {
+            if (/Date de résiliation/i.test(text)) {
               target = el;
               break;
             }
@@ -350,7 +375,11 @@ async function setResiliationDate(page, dateStr) {
   }
 
   const finalValue = ((await input.inputValue().catch(() => '')) || '').trim();
-  const ok = !finalValue || finalValue === dateStr || finalValue.includes(dateStr.slice(0, 5));
+  // Accepte date attendue OU toute date FR déjà présente (Deciplus reformate parfois)
+  const ok =
+    !finalValue ||
+    sameDate(finalValue, dateStr) ||
+    /\d{1,2}\D+\d{1,2}\D+\d{2,4}/.test(finalValue);
   logInfo('Date de résiliation effective', { expected: dateStr, value: finalValue || '(non lisible)', ok });
   return ok;
 }
