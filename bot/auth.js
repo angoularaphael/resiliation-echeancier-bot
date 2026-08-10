@@ -4,6 +4,7 @@ const { ROOT, ensureDir, randomDelay } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { launchChromiumWithRetry } = require('./playwright-launch');
 const { isChooseZoneScreen, selectSiteInPicker, clickSellOnSite } = require('./deciplus-zone');
+const { dismissDeciplusModals } = require('./ui');
 
 const SESSION_DIR = process.env.BOT_SESSION_DIR || path.join(ROOT, 'data', 'session');
 const STORAGE_FILE = path.join(SESSION_DIR, 'storage-state.json');
@@ -482,6 +483,7 @@ async function handleChooseZone(page, siteLabel) {
   }
 
   logInfo('Écran choix de site Deciplus détecté', { site: label });
+  await dismissDeciplusModals(page).catch(() => {});
   const selected = await selectSiteInPicker(page, label);
   if (!selected) {
     logWarn('Sélection site Deciplus échouée sur l’écran zone', { site: label, url: page.url() });

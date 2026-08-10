@@ -1,5 +1,6 @@
 const { randomDelay } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
+const { dismissDeciplusModals, dismissJqueryUiOverlay } = require('./ui');
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -40,9 +41,23 @@ async function selectSiteInPicker(page, siteLabel) {
   const pattern = new RegExp(escapeRegExp(label), 'i');
   logInfo('Sélection site Deciplus', { site: label });
 
+  await dismissDeciplusModals(page).catch(() => {});
+  await dismissJqueryUiOverlay(page).catch(() => {});
+
   const customSelect = page.locator('.ari-select').first();
   if ((await customSelect.count()) > 0 && (await customSelect.isVisible().catch(() => false))) {
-    await customSelect.click();
+    const opened = await customSelect
+      .click({ timeout: 8000 })
+      .then(() => true)
+      .catch(async () => {
+        logWarn('Clic ari-select bloqué — force après dismiss modale');
+        await dismissDeciplusModals(page).catch(() => {});
+        return customSelect
+          .click({ force: true, timeout: 8000 })
+          .then(() => true)
+          .catch(() => false);
+      });
+    if (!opened) return false;
     await randomDelay(400, 800);
 
     const optionSelectors = [
@@ -62,7 +77,7 @@ async function selectSiteInPicker(page, siteLabel) {
         if (!(await opt.isVisible().catch(() => false))) continue;
         const text = ((await opt.textContent().catch(() => '')) || '').trim();
         if (!siteLabelsMatch(text, label) && !pattern.test(text)) continue;
-        await opt.click();
+        await opt.click({ force: true }).catch(() => opt.click());
         await randomDelay(400, 800);
         logInfo('Site Deciplus sélectionné (ari-select)', { site: text });
         return true;
@@ -74,7 +89,7 @@ async function selectSiteInPicker(page, siteLabel) {
     if ((await dropdown.count()) > 0) {
       const option = dropdown.getByText(pattern).first();
       if ((await option.count()) > 0 && (await option.isVisible().catch(() => false))) {
-        await option.click();
+        await option.click({ force: true });
         await randomDelay(400, 800);
         return true;
       }
@@ -82,7 +97,7 @@ async function selectSiteInPicker(page, siteLabel) {
 
     const option = page.getByText(pattern).last();
     if ((await option.count()) > 0 && (await option.isVisible().catch(() => false))) {
-      await option.click();
+      await option.click({ force: true });
       await randomDelay(400, 800);
       return true;
     }
