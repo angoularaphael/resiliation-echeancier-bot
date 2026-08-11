@@ -13,7 +13,9 @@ const {
   clearAuthCooldown,
   saveSession,
   wipeBrowserAuth,
+  handleChooseZone,
 } = require('./auth');
+const { isChooseZoneScreen } = require('./deciplus-zone');
 const { runWithSession, closeBrowser } = require('./browser-pool');
 const { listPending } = require('../lib/queue');
 const { logInfo, logWarn } = require('../lib/logger');
@@ -26,6 +28,10 @@ let lastKeepAliveSuccessAt = Date.now();
 let lastKeepAliveAttemptAt = 0;
 let inFlight = false;
 
+function defaultSiteLabel() {
+  return String(process.env.DECIPLUS_DEFAULT_SITE || 'Minimes').trim();
+}
+
 function touchKeepAliveClock() {
   lastKeepAliveSuccessAt = Date.now();
 }
@@ -35,12 +41,32 @@ function touchKeepAliveClock() {
  * @param {{ forceLogin?: boolean }} opts
  */
 async function refreshSessionIfNeeded(page, opts = {}) {
+  const siteLabel = defaultSiteLabel();
+
   if (!opts.forceLogin) {
     await gotoDeciplus(page, 'nextgen/home');
+    if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+      await handleChooseZone(page, siteLabel);
+    }
     const token = await getAccessToken(page);
     const apiOk = Boolean(token && (await isAccessTokenValid(page, token)));
     if (apiOk && (await isLegacySessionAlive(page))) {
       return { token, renewed: false };
+    }
+    // API OK mais legacy KO souvent = zone non sélectionnée, pas une vraie mort de session
+    if (apiOk && (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page)))) {
+      logInfo('Keepalive — choose-zone détecté, sélection salle sans wipe');
+      await handleChooseZone(page, siteLabel);
+      if (await isLegacySessionAlive(page)) {
+        return { token, renewed: false };
+      }
+    }
+    if (apiOk) {
+      await gotoDeciplus(page, 'nextgen/home');
+      await handleChooseZone(page, siteLabel);
+      if (await isLegacySessionAlive(page)) {
+        return { token, renewed: false };
+      }
     }
     logWarn('Keepalive — session API/legacy morte — reconnexion forcée', {
       api_ok: apiOk,
@@ -49,15 +75,22 @@ async function refreshSessionIfNeeded(page, opts = {}) {
 
   clearAuthCooldown();
   await wipeBrowserAuth(page);
-  await login(page, { force: true });
+  await login(page, { force: true, siteLabel });
   await gotoDeciplus(page, 'nextgen/home');
+  await handleChooseZone(page, siteLabel);
   const token = await getAccessToken(page);
   if (!token || !(await isAccessTokenValid(page, token))) {
     return { token: null, renewed: true };
   }
   if (!(await isLegacySessionAlive(page))) {
-    logWarn('Keepalive — login OK mais legacy select.php toujours inaccessible');
-    return { token: null, renewed: true };
+    // Dernière chance zone avant d’abandonner le keepalive
+    if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+      await handleChooseZone(page, siteLabel);
+    }
+    if (!(await isLegacySessionAlive(page))) {
+      logWarn('Keepalive — login OK mais legacy select.php toujours inaccessible');
+      return { token: null, renewed: true };
+    }
   }
   return { token, renewed: true };
 }

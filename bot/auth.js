@@ -135,6 +135,11 @@ async function wipeBrowserAuth(page) {
  */
 async function isLegacySessionAlive(page) {
   try {
+    // Sur choose-zone, select.php est inaccessible — ce n’est pas une session PHP morte
+    if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+      return false;
+    }
+
     const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
     const origin = new URL(page.url().startsWith('http') ? page.url() : base).origin;
     await page.goto(`${origin}/nextgen/legacy?path=${encodeURIComponent('/select.php')}`, {
@@ -143,10 +148,16 @@ async function isLegacySessionAlive(page) {
     });
     await page.waitForTimeout(Number(process.env.DECIPLUS_NAV_SETTLE_MS || 600));
     if (isSessionExpiredUrl(page.url())) return false;
+    if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+      return false;
+    }
 
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       if (isSessionExpiredUrl(page.url())) return false;
+      if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+        return false;
+      }
       for (const frame of page.frames()) {
         if ((await frame.locator('#i_nom, #buttonNew, #i_tel').count().catch(() => 0)) > 0) {
           return true;
@@ -436,7 +447,7 @@ async function saveSession(context, opts = {}) {
 function isSessionRecoverableError(message = '') {
   // Ne pas traiter « joueurs.php / formulaire » comme session morte :
   // souvent l’UI nextgen/iframe, alors que le token est encore valide.
-  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached|imapflow|mailparser|code email|DECIPLUS_IMAP|cooldown|session inactive/i.test(
+  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached|imapflow|mailparser|code email|DECIPLUS_IMAP|cooldown|session inactive|choose-zone|s[ée]lection site|écran zone/i.test(
     String(message || '')
   );
 }
@@ -487,12 +498,22 @@ async function handleChooseZone(page, siteLabel) {
   const selected = await selectSiteInPicker(page, label);
   if (!selected) {
     logWarn('Sélection site Deciplus échouée sur l’écran zone', { site: label, url: page.url() });
-    return false;
+    throw new Error(`Sélection site Deciplus échouée: ${label} (url=${page.url()})`);
   }
   const sold = await clickSellOnSite(page);
-  if (!sold) {
-    logWarn('Bouton « Vendre sur ce site » introuvable', { site: label });
-    return false;
+  if (!sold || (await isChooseZoneScreen(page)) || /choose-zone/i.test(page.url())) {
+    logWarn('Impossible de quitter choose-zone — retry Accueil', { site: label });
+    const origin = new URL(page.url()).origin;
+    await page.goto(`${origin}/nextgen/home`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.waitForTimeout(Number(process.env.DECIPLUS_NAV_SETTLE_MS || 800));
+    if (await isChooseZoneScreen(page) || /choose-zone/i.test(page.url())) {
+      await dismissDeciplusModals(page).catch(() => {});
+      const again = await selectSiteInPicker(page, label);
+      if (again) await clickSellOnSite(page);
+    }
+  }
+  if ((await isChooseZoneScreen(page)) || /choose-zone/i.test(page.url())) {
+    throw new Error(`Toujours sur choose-zone après sélection site (${label})`);
   }
   logInfo('Site Deciplus prêt après choix de salle', { site: label });
   return true;
@@ -600,17 +621,28 @@ async function performLogin(page, options = {}) {
 
   if (!force && hasStoredSession && !envToken) {
     await gotoDeciplus(page, 'nextgen/home');
-    // Parfois Deciplus renvoie directement sur choose-zone
+    // Toujours résoudre la salle AVANT le probe legacy (sinon select.php = faux « session morte »)
     if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
       logInfo('Session persistée — écran choix de salle');
       await handleChooseZone(page, siteLabel);
     }
     const storedToken = await getAccessToken(page);
     if (storedToken && !isSessionExpiredUrl(page.url()) && (await isAccessTokenValid(page, storedToken))) {
-      // JWT API OK ≠ cookies PHP OK (select.php / joueurs.php → login.php)
-      if (await isLegacySessionAlive(page)) {
-        logInfo('Déjà connecté via session persistée');
+      let legacyOk = await isLegacySessionAlive(page);
+      // Probe peut renvoyer sur choose-zone si la zone n’est pas encore posée
+      if (!legacyOk && (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page)))) {
+        logInfo('Legacy probe → choose-zone — sélection salle puis nouvel essai');
         await handleChooseZone(page, siteLabel);
+        legacyOk = await isLegacySessionAlive(page);
+      }
+      if (!legacyOk) {
+        // Soft recovery : home + zone avant wipe (évite un login OTP à chaque job)
+        await gotoDeciplus(page, 'nextgen/home');
+        await handleChooseZone(page, siteLabel);
+        legacyOk = await isLegacySessionAlive(page);
+      }
+      if (legacyOk) {
+        logInfo('Déjà connecté via session persistée');
         return;
       }
       logWarn('Token API encore valide mais session PHP legacy morte — reconnexion');
@@ -685,6 +717,9 @@ async function performLogin(page, options = {}) {
 
   logInfo('Connexion Deciplus réussie');
   await handleChooseZone(page, siteLabel);
+  if ((await isChooseZoneScreen(page)) || /choose-zone/i.test(page.url())) {
+    throw new Error(`Toujours sur choose-zone après login (${siteLabel})`);
+  }
 }
 
 async function login(page, options = {}) {

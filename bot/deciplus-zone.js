@@ -32,22 +32,77 @@ async function isChooseZoneScreen(page) {
   return (await heading.count()) > 0 && (await heading.isVisible().catch(() => false));
 }
 
-async function selectSiteInPicker(page, siteLabel) {
-  const label = String(siteLabel || '').trim();
-  if (!label) {
-    logInfo('Aucune salle fournie pour le picker Deciplus — site session inchangé');
-    return false;
-  }
-  const pattern = new RegExp(escapeRegExp(label), 'i');
-  logInfo('Sélection site Deciplus', { site: label });
+async function pickSiteViaEvaluate(page, label) {
+  return page
+    .evaluate((want) => {
+      const norm = (s) =>
+        String(s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+      const wantN = norm(want);
+      document.querySelectorAll('.modal-mask').forEach((el) => el.remove());
 
+      const openers = [
+        document.querySelector('.ari-select'),
+        document.querySelector('.el-select'),
+        document.querySelector('[class*="ari-select"]'),
+        document.querySelector('button[aria-haspopup="listbox"]'),
+      ].filter(Boolean);
+      for (const sel of openers) {
+        try {
+          sel.click();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const optSelectors = [
+        '.ari-select-dropdown [role="option"]',
+        '.ari-select-dropdown li',
+        '.ari-select-dropdown .ari-option',
+        '[role="listbox"] [role="option"]',
+        '.ari-option',
+        '.el-select-dropdown__item',
+        '.el-option',
+        'ul[role="listbox"] li',
+        '.dropdown-menu li',
+        '[class*="select"] [class*="option"]',
+      ];
+      const opts = [];
+      for (const sel of optSelectors) {
+        document.querySelectorAll(sel).forEach((el) => opts.push(el));
+      }
+      const unique = [...new Set(opts)];
+      const hit = unique.find((el) => {
+        const t = norm(el.textContent || '');
+        return t && (t.includes(wantN) || wantN.includes(t));
+      });
+      if (!hit) {
+        return {
+          ok: false,
+          options: unique.map((o) => (o.textContent || '').trim()).filter(Boolean).slice(0, 20),
+        };
+      }
+      hit.click();
+      hit.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return { ok: true, site: (hit.textContent || '').trim() };
+    }, label)
+    .catch(() => ({ ok: false }));
+}
+
+async function trySelectSiteOnce(page, label, pattern) {
   await dismissDeciplusModals(page).catch(() => {});
   await dismissJqueryUiOverlay(page).catch(() => {});
   await page.keyboard.press('Escape').catch(() => {});
-  await randomDelay(200, 400);
+  await randomDelay(250, 450);
   await dismissDeciplusModals(page).catch(() => {});
 
-  const customSelect = page.locator('.ari-select').first();
+  const customSelect = page
+    .locator('.ari-select, .el-select, [class*="ari-select"]')
+    .first();
   if ((await customSelect.count()) > 0 && (await customSelect.isVisible().catch(() => false))) {
     const opened = await customSelect
       .click({ force: true, timeout: 8000 })
@@ -60,33 +115,9 @@ async function selectSiteInPicker(page, siteLabel) {
           .then(() => true)
           .catch(() => false);
       });
+
     if (!opened) {
-      // Repli JS : ouvrir + choisir l’option dans le DOM
-      const picked = await page
-        .evaluate((want) => {
-          const norm = (s) =>
-            String(s || '')
-              .normalize('NFD')
-              .replace(/[\u0300-\u036f]/g, '')
-              .toLowerCase();
-          const wantN = norm(want);
-          document.querySelectorAll('.modal-mask').forEach((el) => el.remove());
-          const sel = document.querySelector('.ari-select');
-          if (sel) sel.click();
-          const opts = [
-            ...document.querySelectorAll(
-              '.ari-select-dropdown [role="option"], .ari-select-dropdown li, [role="listbox"] [role="option"], .ari-option'
-            ),
-          ];
-          const hit = opts.find((el) => {
-            const t = norm(el.textContent || '');
-            return t.includes(wantN) || wantN.includes(t);
-          });
-          if (!hit) return { ok: false, options: opts.map((o) => (o.textContent || '').trim()).slice(0, 12) };
-          hit.click();
-          return { ok: true, site: (hit.textContent || '').trim() };
-        }, label)
-        .catch(() => ({ ok: false }));
+      const picked = await pickSiteViaEvaluate(page, label);
       if (picked?.ok) {
         logInfo('Site Deciplus sélectionné (evaluate)', { site: picked.site });
         await randomDelay(400, 800);
@@ -95,7 +126,7 @@ async function selectSiteInPicker(page, siteLabel) {
       logWarn('Options site Deciplus introuvables', picked || {});
       return false;
     }
-    await randomDelay(400, 800);
+    await randomDelay(500, 900);
 
     const optionSelectors = [
       '.ari-select-dropdown [role="option"]',
@@ -104,6 +135,8 @@ async function selectSiteInPicker(page, siteLabel) {
       '[role="listbox"] [role="option"]',
       '.ari-option',
       'li[role="option"]',
+      '.el-select-dropdown__item',
+      '.el-option',
     ];
 
     for (const selOpt of optionSelectors) {
@@ -121,7 +154,7 @@ async function selectSiteInPicker(page, siteLabel) {
       }
     }
 
-    const dropdown = page.locator('.ari-select-dropdown, [role="listbox"]').first();
+    const dropdown = page.locator('.ari-select-dropdown, [role="listbox"], .el-select-dropdown').first();
     if ((await dropdown.count()) > 0) {
       const option = dropdown.getByText(pattern).first();
       if ((await option.count()) > 0 && (await option.isVisible().catch(() => false))) {
@@ -131,12 +164,20 @@ async function selectSiteInPicker(page, siteLabel) {
       }
     }
 
-    const option = page.getByText(pattern).last();
-    if ((await option.count()) > 0 && (await option.isVisible().catch(() => false))) {
-      await option.click({ force: true });
+    // Dropdown ouvert mais options non cliquables via Playwright → evaluate
+    const picked = await pickSiteViaEvaluate(page, label);
+    if (picked?.ok) {
+      logInfo('Site Deciplus sélectionné (evaluate après open)', { site: picked.site });
       await randomDelay(400, 800);
       return true;
     }
+  }
+
+  const option = page.getByText(pattern).last();
+  if ((await option.count()) > 0 && (await option.isVisible().catch(() => false))) {
+    await option.click({ force: true });
+    await randomDelay(400, 800);
+    return true;
   }
 
   const nativeSelect = page.locator('select').first();
@@ -162,6 +203,33 @@ async function selectSiteInPicker(page, siteLabel) {
     }
   }
 
+  // Dernier repli evaluate même sans .ari-select visible
+  const picked = await pickSiteViaEvaluate(page, label);
+  if (picked?.ok) {
+    logInfo('Site Deciplus sélectionné (evaluate fallback)', { site: picked.site });
+    await randomDelay(400, 800);
+    return true;
+  }
+
+  return false;
+}
+
+async function selectSiteInPicker(page, siteLabel) {
+  const label = String(siteLabel || '').trim();
+  if (!label) {
+    logInfo('Aucune salle fournie pour le picker Deciplus — site session inchangé');
+    return false;
+  }
+  const pattern = new RegExp(escapeRegExp(label), 'i');
+  logInfo('Sélection site Deciplus', { site: label });
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const ok = await trySelectSiteOnce(page, label, pattern);
+    if (ok) return true;
+    logWarn('Échec sélection site — nouvel essai', { site: label, attempt });
+    await dismissDeciplusModals(page).catch(() => {});
+    await randomDelay(600, 1100);
+  }
   return false;
 }
 
@@ -186,11 +254,18 @@ async function clickSellOnSite(page) {
     await sellBtn.click({ force: true });
   }
 
-  await page.waitForURL(/vente|nextgen\/vente|choose-zone|nextgen\/?$|manager|membres|accueil/i, {
+  await page.waitForURL(/vente|nextgen\/vente|choose-zone|nextgen\/?$|manager|membres|accueil|home/i, {
     timeout: 20000,
   }).catch(() => {});
   await randomDelay(800, 1500);
-  return true;
+
+  // Si forced=true renvoie encore sur choose-zone, forcer l’accueil
+  if (await isChooseZoneScreen(page)) {
+    const origin = new URL(page.url()).origin;
+    await page.goto(`${origin}/nextgen/home`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await randomDelay(600, 1000);
+  }
+  return !(await isChooseZoneScreen(page));
 }
 
 /**
