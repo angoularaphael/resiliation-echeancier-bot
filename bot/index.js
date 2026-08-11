@@ -947,8 +947,8 @@ async function runLoop(once = false) {
 
   logInfo('Bot Deciplus démarré', getQueueStats());
 
-  // Scan échéancier quotidien à 01h00 (Europe/Paris) — désactiver avec ECHEANCIER_CRON_HOUR=-1
-  const echeancierHour = Number(process.env.ECHEANCIER_CRON_HOUR ?? 1);
+  // Scan échéancier quotidien à 17h00 (Europe/Paris) — désactiver avec ECHEANCIER_CRON_HOUR=-1
+  const echeancierHour = Number(process.env.ECHEANCIER_CRON_HOUR ?? 17);
   const echeancierTz = String(process.env.ECHEANCIER_CRON_TZ || 'Europe/Paris').trim() || 'Europe/Paris';
   const echeancierMs = Number(process.env.ECHEANCIER_CRON_MS ?? 0);
 
