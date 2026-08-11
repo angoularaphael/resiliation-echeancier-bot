@@ -583,7 +583,7 @@ async function findMemberByIdentity(page, identity = {}, options = {}) {
   let form = await readMemberIdentityFields(page);
   if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
     // 1 retry court
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(200);
     form = await readMemberIdentityFields(page);
   }
   if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {

@@ -100,6 +100,10 @@ async function findActiveContracts(page) {
 
         const label = ((await item.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
         if (!label) continue;
+        // Déjà résiliés / terminés : pas d’action « Résilier » → évite action_panel_missing
+        if (/r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur/i.test(label)) {
+          continue;
+        }
 
         let consulter = item
           .locator('xpath=ancestor::div[contains(@class,"og-product-wrapper")][1]')
@@ -142,7 +146,7 @@ async function openContractPage(page, contract) {
   });
 
   await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-  await randomDelay(1200, 2000);
+  await randomDelay(700, 1100);
 
   if (/nextgen\/contract|contract\?idc=/i.test(page.url())) {
     return true;
@@ -161,7 +165,7 @@ async function openContractPage(page, contract) {
   return /nextgen\/contract|contract\?idc=/i.test(page.url());
 }
 
-async function waitActionPanel(page, timeoutMs = 20000) {
+async function waitActionPanel(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const panel = page.getByText(/Action souhaitée/i).first();
@@ -881,17 +885,21 @@ async function cancelSale(page, memberId, options = {}) {
   });
   if (outcome.cancelled_count === 0) {
     const reason = outcome.details[0]?.reason || 'inconnu';
-    // Changement d’abo après résil déjà faite : pas de contrat à couper → continuer la vente
-    if (cancelReason === 'change_to_comptant' && reason === 'no_active_sale') {
-      logInfo('Changement abo — aucun contrat actif, skip résiliation', {
+    const isChange =
+      cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_');
+    // Changement d’abo : le but est la vente. Déjà résilié / panneau absent → on continue.
+    if (isChange) {
+      logInfo('Changement abo — résiliation non bloquante, on continue la vente', {
         member_id: memberId,
         reason,
+        detail_reasons: (outcome.details || []).map((d) => d.reason).filter(Boolean),
       });
       return {
         action: 'sale_cancelled',
         sale_type: 'cancel',
         cancelled_count: 0,
         skipped: true,
+        skip_reason: reason,
         details: outcome.details,
       };
     }

@@ -152,7 +152,7 @@ async function notifyBoutiqueNewMember(order, memberId) {
 }
 
 const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
-const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
+const POLL_MS = Number(process.env.BOT_POLL_MS || 2000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
 const CATALOG_TTL_MS = Number(process.env.BOT_CATALOG_TTL_MS || 10 * 60 * 1000);
 const STALE_PROCESSING_MS = Number(process.env.BOT_STALE_PROCESSING_MS || 15 * 60 * 1000);
@@ -947,30 +947,80 @@ async function runLoop(once = false) {
 
   logInfo('Bot Deciplus démarré', getQueueStats());
 
-  // Scan échéancier quotidien (défaut 24h) — désactiver avec ECHEANCIER_CRON_MS=0
-  const echeancierMs = Number(process.env.ECHEANCIER_CRON_MS ?? 86400000);
-  if (echeancierMs > 0) {
-    const enqueueScan = () => {
+  // Scan échéancier quotidien à 01h00 (Europe/Paris) — désactiver avec ECHEANCIER_CRON_HOUR=-1
+  const echeancierHour = Number(process.env.ECHEANCIER_CRON_HOUR ?? 1);
+  const echeancierTz = String(process.env.ECHEANCIER_CRON_TZ || 'Europe/Paris').trim() || 'Europe/Paris';
+  const echeancierMs = Number(process.env.ECHEANCIER_CRON_MS ?? 0);
+
+  const enqueueScan = () => {
+    try {
+      const { enqueue } = require('../lib/queue');
+      const { normalizeOrder } = require('../lib/normalize');
+      enqueue(
+        normalizeOrder({
+          order_id: `ECHEANCIER-CRON-${Date.now()}`,
+          action: 'echeancier',
+          product_name: 'Scan échéancier impayés',
+          requires_payment: false,
+          requires_iban: false,
+          sale_type: 'none',
+          gym: 'minimes',
+        })
+      );
+      logInfo('Échéancier — job cron enfilé');
+    } catch (err) {
+      logWarn('Échéancier — cron enqueue échoué', { error: err.message });
+    }
+  };
+
+  function zonedParts(date, timeZone) {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      })
+        .formatToParts(date)
+        .filter((p) => p.type !== 'literal')
+        .map((p) => [p.type, p.value])
+    );
+    return {
+      year: Number(parts.year),
+      month: Number(parts.month),
+      day: Number(parts.day),
+      hour: Number(parts.hour),
+      minute: Number(parts.minute),
+    };
+  }
+
+  if (echeancierHour >= 0 && echeancierHour <= 23) {
+    let lastScanDay = '';
+    const tick = () => {
       try {
-        const { enqueue } = require('../lib/queue');
-        const { normalizeOrder } = require('../lib/normalize');
-        enqueue(
-          normalizeOrder({
-            order_id: `ECHEANCIER-CRON-${Date.now()}`,
-            action: 'echeancier',
-            product_name: 'Scan échéancier impayés',
-            requires_payment: false,
-            requires_iban: false,
-            sale_type: 'none',
-            gym: 'minimes',
-          })
-        );
-        logInfo('Échéancier — job cron enfilé');
+        const p = zonedParts(new Date(), echeancierTz);
+        const dayKey = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+        if (p.hour === echeancierHour && p.minute <= 1 && lastScanDay !== dayKey) {
+          lastScanDay = dayKey;
+          enqueueScan();
+        }
       } catch (err) {
-        logWarn('Échéancier — cron enqueue échoué', { error: err.message });
+        logWarn('Échéancier — tick cron échoué', { error: err.message });
       }
     };
-    // Premier scan après 10 min, puis intervalle
+    logInfo('Échéancier — cron quotidien armé', {
+      hour: echeancierHour,
+      tz: echeancierTz,
+    });
+    const t = setInterval(tick, 30_000);
+    if (t.unref) t.unref();
+    tick();
+  } else if (echeancierMs > 0) {
+    // Repli legacy : intervalle ms
     setTimeout(enqueueScan, Number(process.env.ECHEANCIER_CRON_DELAY_MS || 600000));
     const t = setInterval(enqueueScan, echeancierMs);
     if (t.unref) t.unref();
