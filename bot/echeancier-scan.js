@@ -1,12 +1,13 @@
 /**
  * Scan Deciplus Manager → Échéancier → Impayés.
- * Cible : 2 impayés consécutifs (mois en cours) sur contrats comptant / sans engagement → résil auto.
+ * Cible : 2 impayés consécutifs sur contrats comptant / sans engagement → résil auto.
  */
 const { logInfo, logWarn } = require('../lib/logger');
 const { cancelSale } = require('./cancel-sale');
 const { gotoDeciplus } = require('./auth');
 
 function dryRun() {
+  // Défaut = LIVE (résil réelle). Mettre ECHEANCIER_DRY_RUN=1 pour lister seulement.
   return String(process.env.ECHEANCIER_DRY_RUN || '0') === '1';
 }
 
@@ -17,11 +18,14 @@ function currentMonthLabel(d = new Date()) {
 function isEligibleContractLabel(label) {
   const t = String(label || '').toLowerCase();
   if (!t) return false;
-  // Exclure forfaits engagement / 12 mois « année »
+  // Exclure forfaits engagement / 12 mois « année » (sauf sans engagement)
   if (/engagement|12\s*mois|12mois|annuel|saison/i.test(t) && !/sans\s*engagement/i.test(t)) {
     return false;
   }
-  return /comptant|sans\s*engagement|4\s*semaines|\/\s*4|29\s*€|34[,.]99|36[,.]99|44[,.]99/i.test(t) || /comptant/i.test(t);
+  return (
+    /comptant|sans\s*engagement|4\s*semaines|\/\s*4|29\s*€|34[,.]99|36[,.]99|44[,.]99/i.test(t) ||
+    /comptant/i.test(t)
+  );
 }
 
 async function openEcheancierImpayes(page) {
@@ -58,7 +62,6 @@ async function openEcheancierImpayes(page) {
   }
 
   if (!opened) {
-    // Menu Manager → Echéanciers V2 / Echéanciers
     await page.goto(new URL('nextgen/', origin + '/').href, { waitUntil: 'domcontentloaded' }).catch(() => {});
     await page.waitForTimeout(800);
     const manager = page.getByText(/^Manager$/i).first();
@@ -79,7 +82,7 @@ async function openEcheancierImpayes(page) {
     logInfo('Échéancier ouvert via menu', { url: page.url() });
   }
 
-  // Tous les états → Impayés → Appliquer
+  // Filtrer Impayés
   const allStates = page.locator('text=/tous les états|tous les etats/i').first();
   if ((await allStates.count()) > 0) await allStates.click().catch(() => {});
   await page.waitForTimeout(400);
@@ -106,50 +109,90 @@ async function openEcheancierImpayes(page) {
       .first()
       .click()
       .catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2000);
+
+  // Scroll pour charger plus de lignes (tables virtuelles)
+  for (let i = 0; i < 4; i += 1) {
+    await page.mouse.wheel(0, 1200).catch(() => {});
+    await page.waitForTimeout(400);
+  }
 }
 
 /**
- * Parse basique des lignes visibles : regrouper par membre les échéances impayées du mois.
- * Retourne [{ member_id, name, unpaid_count, labels }]
+ * Membres avec au moins 2 échéances impayées (consécutives si dates dispo).
  */
 async function parseUnpaidRows(page) {
-  const month = new Date().getMonth() + 1;
-  const year = new Date().getFullYear();
-  const rows = await page.evaluate(
-    ({ month, year }) => {
-      const out = [];
-      const trs = Array.from(document.querySelectorAll('table tr, .el-table__row, tr'));
-      for (const tr of trs) {
-        const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
-        if (!text || text.length < 8) continue;
-        if (!/impay/i.test(text) && !/non\s*pay/i.test(text)) continue;
-        // date JJ/MM/AAAA
-        const dm = text.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-        if (dm) {
-          const mm = Number(dm[2]);
-          const yy = Number(dm[3]);
-          if (mm !== month || yy !== year) continue;
-        }
-        const idm = text.match(/\b(\d{4,6})\b/);
-        const href = tr.querySelector('a[href*="idj="]')?.getAttribute('href') || '';
-        const idj = (href.match(/idj=(\d+)/) || [])[1] || (idm ? idm[1] : null);
-        out.push({ text: text.slice(0, 200), member_id: idj });
+  const rows = await page.evaluate(() => {
+    const out = [];
+    const trs = Array.from(
+      document.querySelectorAll(
+        'table tbody tr, .el-table__body tr, .el-table__row, table tr, [role="row"]'
+      )
+    );
+    for (const tr of trs) {
+      const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length < 8) continue;
+      if (!/impay|non\s*pay|unpaid|échec|reject|retour/i.test(text)) continue;
+
+      const dateMatches = [...text.matchAll(/(\d{2})\/(\d{2})\/(\d{4})/g)];
+      const dates = dateMatches.map((m) => ({
+        d: Number(m[1]),
+        m: Number(m[2]),
+        y: Number(m[3]),
+        key: `${m[3]}-${m[2]}`,
+        t: new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).getTime(),
+      }));
+
+      const href =
+        tr.querySelector('a[href*="idj="], a[href*="idj%3D"]')?.getAttribute('href') || '';
+      let idj = (href.match(/idj[=%](\d+)/i) || [])[1] || null;
+      if (!idj) {
+        const idm = text.match(/\b(1\d{4}|2\d{4})\b/); // ids membres Deciplus typiques 5 chiffres
+        idj = idm ? idm[1] : null;
       }
-      return out;
-    },
-    { month, year }
-  );
+      out.push({ text: text.slice(0, 240), member_id: idj, dates });
+    }
+    return out;
+  });
 
   const byMember = new Map();
   for (const row of rows) {
     if (!row.member_id) continue;
-    const cur = byMember.get(row.member_id) || { member_id: row.member_id, unpaid_count: 0, samples: [] };
+    const cur = byMember.get(row.member_id) || {
+      member_id: row.member_id,
+      unpaid_count: 0,
+      samples: [],
+      dateKeys: new Set(),
+      timestamps: [],
+    };
     cur.unpaid_count += 1;
-    if (cur.samples.length < 3) cur.samples.push(row.text);
+    if (cur.samples.length < 4) cur.samples.push(row.text);
+    for (const d of row.dates || []) {
+      cur.dateKeys.add(d.key);
+      cur.timestamps.push(d.t);
+    }
     byMember.set(row.member_id, cur);
   }
-  return [...byMember.values()].filter((m) => m.unpaid_count >= 2);
+
+  const results = [];
+  for (const cur of byMember.values()) {
+    const keys = [...cur.dateKeys].sort();
+    let consecutive = cur.unpaid_count >= 2;
+    if (keys.length >= 2) {
+      // 2 mois calendaires distincts avec impayé = suite
+      consecutive = true;
+    }
+    // Même sans dates lisibles : 2+ lignes impayées pour le membre
+    if (!consecutive && cur.unpaid_count < 2) continue;
+    if (cur.unpaid_count < 2) continue;
+    results.push({
+      member_id: cur.member_id,
+      unpaid_count: cur.unpaid_count,
+      samples: cur.samples,
+      months: keys,
+    });
+  }
+  return results;
 }
 
 async function memberHasEligibleContract(page, memberId) {
@@ -166,17 +209,23 @@ async function memberHasEligibleContract(page, memberId) {
  * Exécute un scan complet (à appeler sous runWithSession).
  */
 async function runEcheancierScan(page, { limit = 30 } = {}) {
+  const isDry = dryRun();
   logInfo('Échéancier — scan impayés démarré', {
     month: currentMonthLabel(),
-    dry_run: dryRun(),
+    dry_run: isDry,
+    mode: isDry ? 'LISTE SEULEMENT (ECHEANCIER_DRY_RUN=1)' : 'RÉSIL LIVE',
   });
 
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
   const candidates = await parseUnpaidRows(page);
-  logInfo('Échéancier — candidats 2+ impayés mois', {
+  logInfo('Échéancier — candidats 2+ impayés', {
     count: candidates.length,
-    sample: candidates.slice(0, 5).map((c) => c.member_id),
+    sample: candidates.slice(0, 8).map((c) => ({
+      id: c.member_id,
+      unpaid: c.unpaid_count,
+      months: c.months,
+    })),
   });
 
   const results = [];
@@ -192,7 +241,7 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
         });
         continue;
       }
-      if (dryRun()) {
+      if (isDry) {
         results.push({
           member_id: cand.member_id,
           dry_run: true,
@@ -208,6 +257,11 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
         member_id: cand.member_id,
         cancelled_count: cancel.cancelled_count,
         unpaid_count: cand.unpaid_count,
+        cancel_reason: cancel.reason || null,
+      });
+      logInfo('Échéancier — résiliation effectuée', {
+        member_id: cand.member_id,
+        cancelled_count: cancel.cancelled_count,
       });
     } catch (err) {
       logWarn('Échéancier — membre échoué', { member_id: cand.member_id, error: err.message });
@@ -219,8 +273,9 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
     candidates: candidates.length,
     processed: results.length,
     cancelled: results.filter((r) => r.cancelled_count > 0).length,
+    dry_run: isDry,
   });
-  return { ok: true, candidates: candidates.length, results };
+  return { ok: true, candidates: candidates.length, dry_run: isDry, results };
 }
 
 module.exports = {

@@ -43,21 +43,58 @@ async function selectSiteInPicker(page, siteLabel) {
 
   await dismissDeciplusModals(page).catch(() => {});
   await dismissJqueryUiOverlay(page).catch(() => {});
+  await page.keyboard.press('Escape').catch(() => {});
+  await randomDelay(200, 400);
+  await dismissDeciplusModals(page).catch(() => {});
 
   const customSelect = page.locator('.ari-select').first();
   if ((await customSelect.count()) > 0 && (await customSelect.isVisible().catch(() => false))) {
     const opened = await customSelect
-      .click({ timeout: 8000 })
+      .click({ force: true, timeout: 8000 })
       .then(() => true)
       .catch(async () => {
-        logWarn('Clic ari-select bloqué — force après dismiss modale');
+        logWarn('Clic ari-select bloqué — dismiss modale puis retry');
         await dismissDeciplusModals(page).catch(() => {});
         return customSelect
           .click({ force: true, timeout: 8000 })
           .then(() => true)
           .catch(() => false);
       });
-    if (!opened) return false;
+    if (!opened) {
+      // Repli JS : ouvrir + choisir l’option dans le DOM
+      const picked = await page
+        .evaluate((want) => {
+          const norm = (s) =>
+            String(s || '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toLowerCase();
+          const wantN = norm(want);
+          document.querySelectorAll('.modal-mask').forEach((el) => el.remove());
+          const sel = document.querySelector('.ari-select');
+          if (sel) sel.click();
+          const opts = [
+            ...document.querySelectorAll(
+              '.ari-select-dropdown [role="option"], .ari-select-dropdown li, [role="listbox"] [role="option"], .ari-option'
+            ),
+          ];
+          const hit = opts.find((el) => {
+            const t = norm(el.textContent || '');
+            return t.includes(wantN) || wantN.includes(t);
+          });
+          if (!hit) return { ok: false, options: opts.map((o) => (o.textContent || '').trim()).slice(0, 12) };
+          hit.click();
+          return { ok: true, site: (hit.textContent || '').trim() };
+        }, label)
+        .catch(() => ({ ok: false }));
+      if (picked?.ok) {
+        logInfo('Site Deciplus sélectionné (evaluate)', { site: picked.site });
+        await randomDelay(400, 800);
+        return true;
+      }
+      logWarn('Options site Deciplus introuvables', picked || {});
+      return false;
+    }
     await randomDelay(400, 800);
 
     const optionSelectors = [
@@ -84,7 +121,6 @@ async function selectSiteInPicker(page, siteLabel) {
       }
     }
 
-    // Repli : texte visible dans le dropdown (évite le label déjà affiché dans le select fermé)
     const dropdown = page.locator('.ari-select-dropdown, [role="listbox"]').first();
     if ((await dropdown.count()) > 0) {
       const option = dropdown.getByText(pattern).first();
@@ -130,16 +166,29 @@ async function selectSiteInPicker(page, siteLabel) {
 }
 
 async function clickSellOnSite(page) {
-  const sellBtn = page.getByRole('button', { name: /Vendre sur ce site/i }).first();
+  await dismissDeciplusModals(page).catch(() => {});
+  const sellBtn = page.getByRole('button', { name: /Vendre sur ce site|Accéder|Continuer|Valider/i }).first();
   if ((await sellBtn.count()) === 0) {
-    const alt = page.locator('button:has-text("Vendre"), a:has-text("Vendre sur ce site")').first();
-    if ((await alt.count()) === 0 || !(await alt.isVisible().catch(() => false))) return false;
+    const alt = page
+      .locator(
+        'button:has-text("Vendre"), button:has-text("Accéder"), button:has-text("Continuer"), a:has-text("Vendre sur ce site")'
+      )
+      .first();
+    if ((await alt.count()) === 0 || !(await alt.isVisible().catch(() => false))) {
+      // Dernier repli : quitter choose-zone vers l’accueil
+      const origin = new URL(page.url()).origin;
+      await page.goto(new URL('nextgen/', origin + '/').href, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await randomDelay(800, 1200);
+      return !(await isChooseZoneScreen(page));
+    }
     await alt.click({ force: true });
   } else {
     await sellBtn.click({ force: true });
   }
 
-  await page.waitForURL(/vente|nextgen\/vente|choose-zone/, { timeout: 20000 }).catch(() => {});
+  await page.waitForURL(/vente|nextgen\/vente|choose-zone|nextgen\/?$|manager|membres|accueil/i, {
+    timeout: 20000,
+  }).catch(() => {});
   await randomDelay(800, 1500);
   return true;
 }
