@@ -1004,7 +1004,9 @@ async function runLoop(once = false) {
       try {
         const p = zonedParts(new Date(), echeancierTz);
         const dayKey = `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
-        if (p.hour === echeancierHour && p.minute <= 1 && lastScanDay !== dayKey) {
+        // Premier tick à partir de l’heure cible (toute la fenêtre horaire) — évite de rater
+        // le scan si le process redémarre après xx:01 ou si le tick tombe hors minute 0–1.
+        if (p.hour === echeancierHour && lastScanDay !== dayKey) {
           lastScanDay = dayKey;
           enqueueScan();
         }
@@ -1015,6 +1017,7 @@ async function runLoop(once = false) {
     logInfo('Échéancier — cron quotidien armé', {
       hour: echeancierHour,
       tz: echeancierTz,
+      window: `dès ${echeancierHour}h00 (${echeancierTz})`,
     });
     const t = setInterval(tick, 30_000);
     if (t.unref) t.unref();
