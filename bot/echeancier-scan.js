@@ -1,6 +1,6 @@
 /**
  * Scan Deciplus Manager → Échéancier → Impayés.
- * Cible : 2 impayés consécutifs sur contrats comptant / sans engagement → résil auto.
+ * Cible : 2+ impayés → résiliation auto des contrats actifs (hors badge).
  */
 const { logInfo, logWarn } = require('../lib/logger');
 const { cancelSale } = require('./cancel-sale');
@@ -15,17 +15,19 @@ function currentMonthLabel(d = new Date()) {
   return d.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
 }
 
+function isBadgeLabel(label) {
+  return /badge|carte\s*d['’]?\s*acc[eè]s/i.test(String(label || ''));
+}
+
+/**
+ * Contrats à résilier sur impayés : tout abonnement actif sauf badge.
+ * (Avant : filtre trop strict « comptant/sans engagement » → 0 résil alors que candidats trouvés.)
+ */
 function isEligibleContractLabel(label) {
-  const t = String(label || '').toLowerCase();
+  const t = String(label || '').trim();
   if (!t) return false;
-  // Exclure forfaits engagement / 12 mois « année » (sauf sans engagement)
-  if (/engagement|12\s*mois|12mois|annuel|saison/i.test(t) && !/sans\s*engagement/i.test(t)) {
-    return false;
-  }
-  return (
-    /comptant|sans\s*engagement|4\s*semaines|\/\s*4|29\s*€|34[,.]99|36[,.]99|44[,.]99/i.test(t) ||
-    /comptant/i.test(t)
-  );
+  if (isBadgeLabel(t)) return false;
+  return true;
 }
 
 async function openEcheancierImpayes(page) {
@@ -179,10 +181,8 @@ async function parseUnpaidRows(page) {
     const keys = [...cur.dateKeys].sort();
     let consecutive = cur.unpaid_count >= 2;
     if (keys.length >= 2) {
-      // 2 mois calendaires distincts avec impayé = suite
       consecutive = true;
     }
-    // Même sans dates lisibles : 2+ lignes impayées pour le membre
     if (!consecutive && cur.unpaid_count < 2) continue;
     if (cur.unpaid_count < 2) continue;
     results.push({
@@ -201,7 +201,11 @@ async function memberHasEligibleContract(page, memberId) {
   await page.waitForTimeout(800);
   const { findActiveContracts } = require('./cancel-sale');
   const contracts = await findActiveContracts(page);
-  const eligible = contracts.filter((c) => isEligibleContractLabel(c.label));
+  let eligible = contracts.filter((c) => isEligibleContractLabel(c.label));
+  // Repli : tout contrat actif non-badge si le filtre n’a rien pris
+  if (!eligible.length && contracts.length) {
+    eligible = contracts.filter((c) => !isBadgeLabel(c.label));
+  }
   return { contracts, eligible };
 }
 
@@ -215,12 +219,18 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
     dry_run: isDry,
     mode: isDry ? 'LISTE SEULEMENT (ECHEANCIER_DRY_RUN=1)' : 'RÉSIL LIVE',
   });
+  if (isDry) {
+    logWarn('Échéancier — DRY RUN actif : aucune résiliation ne sera faite (ECHEANCIER_DRY_RUN=1)');
+  }
 
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
   const candidates = await parseUnpaidRows(page);
+  const max = Math.max(0, Number(limit) || 30);
   logInfo('Échéancier — candidats 2+ impayés', {
     count: candidates.length,
+    will_process: Math.min(candidates.length, max),
+    dry_run: isDry,
     sample: candidates.slice(0, 8).map((c) => ({
       id: c.member_id,
       unpaid: c.unpaid_count,
@@ -229,10 +239,24 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
   });
 
   const results = [];
-  for (const cand of candidates.slice(0, limit)) {
+  for (const cand of candidates.slice(0, max)) {
     try {
+      logInfo('Échéancier — traitement membre', {
+        member_id: cand.member_id,
+        unpaid_count: cand.unpaid_count,
+      });
       const { eligible, contracts } = await memberHasEligibleContract(page, cand.member_id);
+      logInfo('Échéancier — contrats fiche', {
+        member_id: cand.member_id,
+        active: contracts.length,
+        to_cancel: eligible.length,
+        labels: contracts.map((c) => c.label?.slice(0, 70)),
+      });
       if (!eligible.length) {
+        logWarn('Échéancier — aucun contrat actif à résilier', {
+          member_id: cand.member_id,
+          active_count: contracts.length,
+        });
         results.push({
           member_id: cand.member_id,
           skipped: true,
@@ -242,6 +266,10 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
         continue;
       }
       if (isDry) {
+        logInfo('Échéancier — dry-run (pas de résil)', {
+          member_id: cand.member_id,
+          would_cancel: eligible.map((c) => c.label?.slice(0, 60)),
+        });
         results.push({
           member_id: cand.member_id,
           dry_run: true,
@@ -250,6 +278,10 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
         });
         continue;
       }
+      logInfo('Échéancier — lancement résiliation', {
+        member_id: cand.member_id,
+        contracts: eligible.map((c) => c.label?.slice(0, 60)),
+      });
       const cancel = await cancelSale(page, cand.member_id, {
         cancelReason: 'echeancier_impayes',
       });
@@ -257,7 +289,7 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
         member_id: cand.member_id,
         cancelled_count: cancel.cancelled_count,
         unpaid_count: cand.unpaid_count,
-        cancel_reason: cancel.reason || null,
+        skip_reason: cancel.skip_reason || null,
       });
       logInfo('Échéancier — résiliation effectuée', {
         member_id: cand.member_id,
@@ -269,12 +301,24 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
     }
   }
 
+  const cancelled = results.filter((r) => Number(r.cancelled_count) > 0).length;
+  const skipped = results.filter((r) => r.skipped || r.dry_run).length;
+  const failed = results.filter((r) => r.error).length;
   logInfo('Échéancier — scan terminé', {
     candidates: candidates.length,
     processed: results.length,
-    cancelled: results.filter((r) => r.cancelled_count > 0).length,
+    cancelled,
+    skipped,
+    failed,
     dry_run: isDry,
   });
+  if (candidates.length > 0 && cancelled === 0 && !isDry) {
+    logWarn('Échéancier — 0 résiliation alors que des candidats existent — voir skips/erreurs ci-dessus', {
+      skipped,
+      failed,
+      sample_results: results.slice(0, 5),
+    });
+  }
   return { ok: true, candidates: candidates.length, dry_run: isDry, results };
 }
 
