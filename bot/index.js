@@ -437,23 +437,11 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
     saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
     if (memberResult.action === 'created') {
-      const memberEmail = order.customer?.email || order.email;
-      if (!isTestMemberEmail(memberEmail)) {
-        await sendAlert(`Nouveau membre Deciplus créé — ${order.order_id}`, {
-          order_id: order.order_id,
-          member_id: memberId,
-          email: memberEmail,
-          name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim(),
-          gym: order.gym,
-          type: 'new_member',
-        }).catch(() => {});
-        await notifyBoutiqueNewMember(order, memberId).catch(() => {});
-      } else {
-        logInfo('Création membre test — pas d’alerte email admin', {
-          order_id: order.order_id,
-          member_id: memberId,
-        });
-      }
+      // Info only — do not sendAlert (that logs ERROR + admin webhook noise).
+      logInfo('Nouveau membre Deciplus créé — pas d’alerte admin', {
+        order_id: order.order_id,
+        member_id: memberId,
+      });
     }
   } else {
     logInfo('Reprise job — membre déjà créé', { order_id: order.order_id, member_id: memberId });
