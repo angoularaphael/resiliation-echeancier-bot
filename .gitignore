@@ -3,5 +3,6 @@
 env.bothosting
 data/session/
 data/queue/
+data/echeancier-state.json
 logs/
 playwright-report/

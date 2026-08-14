@@ -5,7 +5,10 @@ BotHosting : `prem-eu2.bot-hosting.net:21268`
 Gère :
 - résiliations boutique (`action: cancel`)
 - vérif identité / changements d’abo
-- scan Manager → Échéancier → Impayés (2 impayés consécutifs mois en cours → résil comptant / sans engagement)
+- scan Manager → Échéancier → Impayés :
+  - relance mail si impayé à la date du jour / mois en cours
+  - le mois suivant, mail contentieux (régulariser sinon résiliation sous 24h)
+  - tous les jours à 17h **et au démarrage** : scan + résiliation (date effective = aujourd’hui, mois en cours)
 
 Ventes / inscriptions restent sur `boxi-deci-bot` (`BOXPLUS_BOT_URL`).
 
@@ -20,3 +23,9 @@ Ventes / inscriptions restent sur `boxi-deci-bot` (`BOXPLUS_BOT_URL`).
 Scan manuel : `POST /api/echeancier/scan` avec header `x-sync-secret`.
 
 `ECHEANCIER_DRY_RUN=1` pour lister sans résilier.
+
+Test local (analyse puis 2 résils à la suite, navigateur visible) :
+
+```
+node scripts/test-echeancier-two.js
+```

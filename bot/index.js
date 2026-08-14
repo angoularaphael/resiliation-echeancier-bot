@@ -682,6 +682,10 @@ async function processJob(page, job) {
     const { runEcheancierScan } = require('./echeancier-scan');
     const scan = await runEcheancierScan(page, {
       limit: Number(order.limit || process.env.ECHEANCIER_LIMIT || 30),
+      cancelLimit: Number(order.cancel_limit || order.limit || process.env.ECHEANCIER_LIMIT || 30),
+      forceCancel:
+        order.force_cancel === true ||
+        String(order.force_cancel || process.env.ECHEANCIER_FORCE_CANCEL || '') === '1',
     });
     return { status: STATUS.SUCCESS, action: 'echeancier', ...scan };
   }
@@ -939,14 +943,15 @@ async function runLoop(once = false) {
   const echeancierHour = Number(process.env.ECHEANCIER_CRON_HOUR ?? 17);
   const echeancierTz = String(process.env.ECHEANCIER_CRON_TZ || 'Europe/Paris').trim() || 'Europe/Paris';
   const echeancierMs = Number(process.env.ECHEANCIER_CRON_MS ?? 0);
+  const startupScan = String(process.env.ECHEANCIER_STARTUP_SCAN || '1') !== '0';
 
-  const enqueueScan = () => {
+  const enqueueScan = (reason = 'cron') => {
     try {
       const { enqueue } = require('../lib/queue');
       const { normalizeOrder } = require('../lib/normalize');
       enqueue(
         normalizeOrder({
-          order_id: `ECHEANCIER-CRON-${Date.now()}`,
+          order_id: `ECHEANCIER-${reason.toUpperCase()}-${Date.now()}`,
           action: 'echeancier',
           product_name: 'Scan échéancier impayés',
           requires_payment: false,
@@ -955,9 +960,9 @@ async function runLoop(once = false) {
           gym: 'minimes',
         })
       );
-      logInfo('Échéancier — job cron enfilé');
+      logInfo('Échéancier — job enfilé', { reason });
     } catch (err) {
-      logWarn('Échéancier — cron enqueue échoué', { error: err.message });
+      logWarn('Échéancier — enqueue échoué', { error: err.message, reason });
     }
   };
 
@@ -996,7 +1001,7 @@ async function runLoop(once = false) {
         // le scan si le process redémarre après xx:01 ou si le tick tombe hors minute 0–1.
         if (p.hour === echeancierHour && lastScanDay !== dayKey) {
           lastScanDay = dayKey;
-          enqueueScan();
+          enqueueScan('cron17h');
         }
       } catch (err) {
         logWarn('Échéancier — tick cron échoué', { error: err.message });
@@ -1009,11 +1014,18 @@ async function runLoop(once = false) {
     });
     const t = setInterval(tick, 30_000);
     if (t.unref) t.unref();
+    if (startupScan) {
+      enqueueScan('startup');
+      const now = zonedParts(new Date(), echeancierTz);
+      if (now.hour === echeancierHour) {
+        lastScanDay = `${now.year}-${String(now.month).padStart(2, '0')}-${String(now.day).padStart(2, '0')}`;
+      }
+    }
     tick();
   } else if (echeancierMs > 0) {
     // Repli legacy : intervalle ms
-    setTimeout(enqueueScan, Number(process.env.ECHEANCIER_CRON_DELAY_MS || 600000));
-    const t = setInterval(enqueueScan, echeancierMs);
+    setTimeout(() => enqueueScan('interval'), Number(process.env.ECHEANCIER_CRON_DELAY_MS || 600000));
+    const t = setInterval(() => enqueueScan('interval'), echeancierMs);
     if (t.unref) t.unref();
   }
 

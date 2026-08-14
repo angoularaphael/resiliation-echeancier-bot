@@ -35,6 +35,8 @@ function createBotServer() {
         order_id: `ECHEANCIER-${Date.now()}`,
         action: 'echeancier',
         limit: req.body?.limit,
+        cancel_limit: req.body?.cancel_limit,
+        force_cancel: req.body?.force_cancel === true || req.body?.force_cancel === '1',
         product_name: 'Scan échéancier impayés',
         requires_payment: false,
         requires_iban: false,
@@ -42,7 +44,7 @@ function createBotServer() {
         gym: 'minimes',
       });
       const result = enqueue(order);
-      logInfo('Scan échéancier demandé', { order_id: order.order_id });
+      logInfo('Scan échéancier demandé', { order_id: order.order_id, force_cancel: Boolean(req.body?.force_cancel) });
       res.json({ ok: true, ...result });
     } catch (err) {
       logError('Scan échéancier enqueue échoué', { error: err.message });

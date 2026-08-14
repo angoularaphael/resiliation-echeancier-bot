@@ -1,10 +1,14 @@
 /**
  * Scan Deciplus Manager → Échéancier → Impayés.
- * Cible : 2+ impayés → résiliation auto des contrats actifs (hors badge).
+ * Relance mail (impayé du jour / mois en cours), contentieux le mois suivant,
+ * résiliation 24h après (date effective = aujourd’hui, mois en cours).
  */
 const { logInfo, logWarn } = require('../lib/logger');
 const { cancelSale } = require('./cancel-sale');
 const { gotoDeciplus } = require('./auth');
+const { classifyUnpaid, shouldCancel, nextCancelAfter } = require('../lib/echeancier-policy');
+const { loadState, saveState, touchMember } = require('../lib/echeancier-state');
+const { sendUnpaidReminder, sendContentieuxNotice } = require('../lib/echeancier-mail');
 
 function dryRun() {
   // Défaut = LIVE (résil réelle). Mettre ECHEANCIER_DRY_RUN=1 pour lister seulement.
@@ -121,7 +125,7 @@ async function openEcheancierImpayes(page) {
 }
 
 /**
- * Membres avec au moins 2 échéances impayées (consécutives si dates dispo).
+ * Membres avec au moins 1 échéance impayée (date du jour / mois en cours / mois précédent).
  */
 async function parseUnpaidRows(page) {
   const rows = await page.evaluate(() => {
@@ -149,10 +153,11 @@ async function parseUnpaidRows(page) {
         tr.querySelector('a[href*="idj="], a[href*="idj%3D"]')?.getAttribute('href') || '';
       let idj = (href.match(/idj[=%](\d+)/i) || [])[1] || null;
       if (!idj) {
-        const idm = text.match(/\b(1\d{4}|2\d{4})\b/); // ids membres Deciplus typiques 5 chiffres
+        const idm = text.match(/\b(1\d{4}|2\d{4})\b/);
         idj = idm ? idm[1] : null;
       }
-      out.push({ text: text.slice(0, 240), member_id: idj, dates });
+      const email = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || '';
+      out.push({ text: text.slice(0, 240), member_id: idj, dates, email });
     }
     return out;
   });
@@ -166,9 +171,11 @@ async function parseUnpaidRows(page) {
       samples: [],
       dateKeys: new Set(),
       timestamps: [],
+      email: '',
     };
     cur.unpaid_count += 1;
     if (cur.samples.length < 4) cur.samples.push(row.text);
+    if (!cur.email && row.email) cur.email = row.email;
     for (const d of row.dates || []) {
       cur.dateKeys.add(d.key);
       cur.timestamps.push(d.t);
@@ -178,18 +185,14 @@ async function parseUnpaidRows(page) {
 
   const results = [];
   for (const cur of byMember.values()) {
-    const keys = [...cur.dateKeys].sort();
-    let consecutive = cur.unpaid_count >= 2;
-    if (keys.length >= 2) {
-      consecutive = true;
-    }
-    if (!consecutive && cur.unpaid_count < 2) continue;
-    if (cur.unpaid_count < 2) continue;
+    if (cur.unpaid_count < 1) continue;
     results.push({
       member_id: cur.member_id,
       unpaid_count: cur.unpaid_count,
       samples: cur.samples,
-      months: keys,
+      months: [...cur.dateKeys].sort(),
+      timestamps: cur.timestamps,
+      email: cur.email || '',
     });
   }
   return results;
@@ -209,99 +212,189 @@ async function memberHasEligibleContract(page, memberId) {
   return { contracts, eligible };
 }
 
+async function readMemberContact(page) {
+  const { getMemberFormContext } = require('./member');
+  const ctx = await getMemberFormContext(page, { waitMs: 5000 });
+  const email = await ctx
+    .locator('input[name="email"]:not(#i_email)')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  const firstName = await ctx
+    .locator('input[name="prenom"]:not(#i_prenom)')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  const lastName = await ctx
+    .locator('input[name="nom"]:not(#i_nom)')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  return {
+    email: String(email || '').trim(),
+    firstName: String(firstName || '').trim(),
+    lastName: String(lastName || '').trim(),
+  };
+}
+
 /**
- * Exécute un scan complet (à appeler sous runWithSession).
+ * 1) Analyse + mails (relance jour J, contentieux mois suivant).
+ * 2) Résiliation mois en cours pour ceux dont le délai 24h est écoulé
+ *    (ou forceCancel pour un test limité).
  */
-async function runEcheancierScan(page, { limit = 30 } = {}) {
+async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = false } = {}) {
   const isDry = dryRun();
+  const max = Math.max(0, Number(limit) || 30);
+  const maxCancel = Math.max(0, Number(cancelLimit != null ? cancelLimit : max) || 0);
+  const force = Boolean(forceCancel) && !isDry;
   logInfo('Échéancier — scan impayés démarré', {
     month: currentMonthLabel(),
     dry_run: isDry,
-    mode: isDry ? 'LISTE SEULEMENT (ECHEANCIER_DRY_RUN=1)' : 'RÉSIL LIVE',
+    force_cancel: force,
+    limit: max,
+    cancel_limit: maxCancel,
   });
-  if (isDry) {
-    logWarn('Échéancier — DRY RUN actif : aucune résiliation ne sera faite (ECHEANCIER_DRY_RUN=1)');
-  }
 
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
   const candidates = await parseUnpaidRows(page);
-  const max = Math.max(0, Number(limit) || 30);
-  logInfo('Échéancier — candidats 2+ impayés', {
+  const work = candidates.slice(0, max);
+  logInfo('Échéancier — impayés détectés', {
     count: candidates.length,
-    will_process: Math.min(candidates.length, max),
-    dry_run: isDry,
-    sample: candidates.slice(0, 8).map((c) => ({
+    will_process: work.length,
+    sample: work.slice(0, 8).map((c) => ({
       id: c.member_id,
       unpaid: c.unpaid_count,
       months: c.months,
     })),
   });
 
+  const state = loadState();
   const results = [];
-  for (const cand of candidates.slice(0, max)) {
+  let cancelled = 0;
+
+  logInfo('Échéancier — phase ANALYSE (mails)');
+  for (let i = 0; i < work.length; i += 1) {
+    const cand = work[i];
+    const classified = classifyUnpaid(cand);
+    const row = {
+      member_id: cand.member_id,
+      unpaid_count: cand.unpaid_count,
+      months: cand.months,
+      classified,
+    };
     try {
-      logInfo('Échéancier — traitement membre', {
+      logInfo(`Échéancier — analyse ${i + 1}/${work.length}`, {
         member_id: cand.member_id,
-        unpaid_count: cand.unpaid_count,
+        due_today: classified.dueToday,
+        current_month: classified.hasCurrent,
+        previous_month: classified.hasPrevious,
       });
       const { eligible, contracts } = await memberHasEligibleContract(page, cand.member_id);
-      logInfo('Échéancier — contrats fiche', {
-        member_id: cand.member_id,
-        active: contracts.length,
-        to_cancel: eligible.length,
-        labels: contracts.map((c) => c.label?.slice(0, 70)),
+      const contact = await readMemberContact(page);
+      const email = contact.email || cand.email || '';
+      const prenom = contact.firstName || '';
+      touchMember(state, cand.member_id, {
+        email,
+        prenom,
+        nom: contact.lastName || '',
+        last_unpaid_months: cand.months,
+        last_seen_at: new Date().toISOString(),
       });
-      if (!eligible.length) {
-        logWarn('Échéancier — aucun contrat actif à résilier', {
-          member_id: cand.member_id,
-          active_count: contracts.length,
-        });
-        results.push({
-          member_id: cand.member_id,
-          skipped: true,
-          reason: 'no_eligible_contract',
-          contracts: contracts.map((c) => c.label?.slice(0, 60)),
-        });
-        continue;
+      const mem = state.members[cand.member_id] || {};
+
+      if (!isDry && classified.wantsReminder && !mem.reminder_at) {
+        const mail = await sendUnpaidReminder({ email, prenom });
+        if (mail.sent) touchMember(state, cand.member_id, { reminder_at: new Date().toISOString() });
+        row.reminder = mail;
+      } else if (mem.reminder_at) {
+        row.reminder = { skipped: true, already: true };
       }
-      if (isDry) {
-        logInfo('Échéancier — dry-run (pas de résil)', {
-          member_id: cand.member_id,
-          would_cancel: eligible.map((c) => c.label?.slice(0, 60)),
-        });
-        results.push({
-          member_id: cand.member_id,
-          dry_run: true,
-          would_cancel: eligible.map((c) => c.label?.slice(0, 60)),
-          unpaid_count: cand.unpaid_count,
-        });
-        continue;
+
+      if (!isDry && classified.wantsContentieux && !mem.contentieux_at) {
+        const mail = await sendContentieuxNotice({ email, prenom });
+        if (mail.sent) {
+          touchMember(state, cand.member_id, {
+            contentieux_at: new Date().toISOString(),
+            cancel_after: nextCancelAfter(),
+          });
+        }
+        row.contentieux = mail;
+      } else if (mem.contentieux_at) {
+        row.contentieux = { skipped: true, already: true };
       }
-      logInfo('Échéancier — lancement résiliation', {
+
+      row.contracts = contracts.map((c) => c.label?.slice(0, 60));
+      row.eligible = eligible.map((c) => c.label?.slice(0, 60));
+      row.email = email || null;
+    } catch (err) {
+      logWarn('Échéancier — analyse membre échouée', { member_id: cand.member_id, error: err.message });
+      row.error = err.message;
+    }
+    results.push(row);
+  }
+  saveState(state);
+
+  logInfo('Échéancier — phase RÉSILIATION (mois en cours)');
+  for (let i = 0; i < work.length; i += 1) {
+    if (cancelled >= maxCancel) break;
+    const cand = work[i];
+    const row = results[i];
+    const classified = classifyUnpaid(cand);
+    const mem = state.members[cand.member_id] || {};
+    if (mem.cancelled_at) {
+      row.skipped = true;
+      row.reason = 'already_cancelled';
+      continue;
+    }
+    if (!row.eligible || !row.eligible.length) {
+      row.skipped = true;
+      row.reason = row.reason || 'no_eligible_contract';
+      logWarn('Échéancier — aucun contrat actif à résilier', { member_id: cand.member_id });
+      continue;
+    }
+    const due = shouldCancel(mem, classified, { force });
+    if (!due) {
+      row.skipped = true;
+      row.reason = classified.wantsContentieux ? 'wait_24h_contentieux' : 'reminder_only';
+      continue;
+    }
+    if (isDry) {
+      row.dry_run = true;
+      row.would_cancel = row.eligible;
+      logInfo(`Échéancier — dry-run résil ${i + 1}/${work.length}`, {
         member_id: cand.member_id,
-        contracts: eligible.map((c) => c.label?.slice(0, 60)),
+        would_cancel: row.eligible,
+      });
+      continue;
+    }
+    try {
+      logInfo(`Échéancier — résiliation ${cancelled + 1}/${maxCancel}`, {
+        member_id: cand.member_id,
+        contracts: row.eligible,
       });
       const cancel = await cancelSale(page, cand.member_id, {
         cancelReason: 'echeancier_impayes',
+        cancelDate: new Date(),
       });
-      results.push({
-        member_id: cand.member_id,
-        cancelled_count: cancel.cancelled_count,
-        unpaid_count: cand.unpaid_count,
-        skip_reason: cancel.skip_reason || null,
-      });
-      logInfo('Échéancier — résiliation effectuée', {
-        member_id: cand.member_id,
-        cancelled_count: cancel.cancelled_count,
-      });
+      row.cancelled_count = cancel.cancelled_count;
+      row.skip_reason = cancel.skip_reason || null;
+      if (Number(cancel.cancelled_count) > 0) {
+        cancelled += 1;
+        touchMember(state, cand.member_id, { cancelled_at: new Date().toISOString() });
+        saveState(state);
+        logInfo('Échéancier — résiliation effectuée', {
+          member_id: cand.member_id,
+          cancelled_count: cancel.cancelled_count,
+        });
+      }
     } catch (err) {
-      logWarn('Échéancier — membre échoué', { member_id: cand.member_id, error: err.message });
-      results.push({ member_id: cand.member_id, error: err.message });
+      logWarn('Échéancier — résiliation échouée', { member_id: cand.member_id, error: err.message });
+      row.error = err.message;
     }
   }
+  saveState(state);
 
-  const cancelled = results.filter((r) => Number(r.cancelled_count) > 0).length;
   const skipped = results.filter((r) => r.skipped || r.dry_run).length;
   const failed = results.filter((r) => r.error).length;
   logInfo('Échéancier — scan terminé', {
@@ -312,14 +405,7 @@ async function runEcheancierScan(page, { limit = 30 } = {}) {
     failed,
     dry_run: isDry,
   });
-  if (candidates.length > 0 && cancelled === 0 && !isDry) {
-    logWarn('Échéancier — 0 résiliation alors que des candidats existent — voir skips/erreurs ci-dessus', {
-      skipped,
-      failed,
-      sample_results: results.slice(0, 5),
-    });
-  }
-  return { ok: true, candidates: candidates.length, dry_run: isDry, results };
+  return { ok: true, candidates: candidates.length, dry_run: isDry, cancelled, results };
 }
 
 module.exports = {
