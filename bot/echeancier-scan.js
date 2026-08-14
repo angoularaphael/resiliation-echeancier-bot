@@ -1,14 +1,23 @@
 /**
  * Scan Deciplus Manager → Échéancier → Impayés.
- * Relance mail (impayé du jour / mois en cours), contentieux le mois suivant,
- * résiliation 24h après (date effective = aujourd’hui, mois en cours).
+ * Un mail de relance (vouvoiement + lien de paiement) au premier passage 17h.
+ * Chaque 17h = une tentative. À la 10e, si toujours impayé → résiliation.
  */
 const { logInfo, logWarn } = require('../lib/logger');
 const { cancelSale } = require('./cancel-sale');
 const { gotoDeciplus } = require('./auth');
-const { classifyUnpaid, shouldCancel, nextCancelAfter } = require('../lib/echeancier-policy');
+const {
+  classifyUnpaid,
+  shouldCancel,
+  shouldSendReminder,
+  shouldCountAttempt,
+  isRelanceRun,
+  parisDayKey,
+} = require('../lib/echeancier-policy');
 const { loadState, saveState, touchMember } = require('../lib/echeancier-state');
-const { sendUnpaidReminder, sendContentieuxNotice } = require('../lib/echeancier-mail');
+const { sendUnpaidReminder } = require('../lib/echeancier-mail');
+const { mapOffer, eurosToCents, gymFromUnpaid, formatEurosFromCents } = require('../lib/echeancier-offer');
+const { buildPayUrl } = require('../lib/echeancier-pay-link');
 
 function dryRun() {
   // Défaut = LIVE (résil réelle). Mettre ECHEANCIER_DRY_RUN=1 pour lister seulement.
@@ -375,6 +384,10 @@ function candidatesFromScheduleRows(rows) {
     const [y, m, d] = date.split('-').map(Number);
     if (!y || !m || !d) continue;
     const name = [r.member?.name, r.member?.surname].filter(Boolean).join(' ').trim();
+    const productName = String(r.product?.name || r.prestation || r.label || '').trim();
+    const amountCents = eurosToCents(r.amountTTC ?? r.inclTax ?? r.priceTTC ?? r.amount ?? r.price ?? 0);
+    const site =
+      r.site?.name || r.siteName || r.clubName || r.zoneName || r.zone?.name || r.site || '';
     const cur = byMember.get(memberId) || {
       member_id: memberId,
       name,
@@ -383,13 +396,19 @@ function candidatesFromScheduleRows(rows) {
       dateKeys: new Set(),
       timestamps: [],
       email: '',
+      product_name: '',
+      amount_cents: 0,
+      site: '',
     };
     cur.unpaid_count += 1;
     if (!cur.name && name) cur.name = name;
+    if (!cur.product_name && productName) cur.product_name = productName;
+    if (!cur.amount_cents && amountCents) cur.amount_cents = amountCents;
+    if (!cur.site && site) cur.site = String(site);
     cur.dateKeys.add(`${y}-${String(m).padStart(2, '0')}`);
     cur.timestamps.push(new Date(y, m - 1, d).getTime());
     if (cur.samples.length < 4) {
-      cur.samples.push(`${date} ${name} ${r.product?.name || ''} ${r.status || 'unpaid'}`.trim());
+      cur.samples.push(`${date} ${name} ${productName} ${r.status || 'unpaid'}`.trim());
     }
     byMember.set(memberId, cur);
   }
@@ -401,6 +420,9 @@ function candidatesFromScheduleRows(rows) {
     months: [...cur.dateKeys].sort(),
     timestamps: cur.timestamps,
     email: cur.email || '',
+    product_name: cur.product_name || '',
+    amount_cents: cur.amount_cents || 0,
+    gym: gymFromUnpaid({ site: cur.site, samples: cur.samples }),
   }));
 }
 
@@ -533,10 +555,13 @@ async function fetchMemberContactApi(page, memberId) {
   }
   const m = body?.response || body?.member || body?.data || body || {};
   const email = pickEmail(m) || pickEmail(body);
+  const zone = String(m.zone || m.zoneName || m.site || m.categoryName || '').trim();
   return {
     email,
     firstName: String(m.name || m.prenom || m.firstName || '').trim(),
     lastName: String(m.surname || m.nom || m.lastName || '').trim(),
+    zone,
+    gym: gymFromUnpaid({ zone, site: zone }),
   };
 }
 
@@ -570,12 +595,15 @@ async function readMemberContact(page) {
 }
 
 /**
- * 1) Analyse + mails (relance jour J, contentieux mois suivant).
- * 2) Résiliation mois en cours pour ceux dont le délai 24h est écoulé
- *    (ou forceCancel pour un test limité).
+ * 1) Analyse + un mail de relance (premier 17h uniquement).
+ * 2) Chaque 17h incrémente la tentative ; à la 10e si inchangé → résiliation.
  */
-async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = false } = {}) {
+async function runEcheancierScan(
+  page,
+  { limit = 30, cancelLimit, forceCancel = false, kind = '' } = {}
+) {
   const isDry = dryRun();
+  const isRelance = isRelanceRun(kind);
   const max = Math.max(0, Number(limit) || 30);
   const maxCancel = Math.max(0, Number(cancelLimit != null ? cancelLimit : max) || 0);
   const force = Boolean(forceCancel) && !isDry;
@@ -583,6 +611,8 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     month: currentMonthLabel(),
     dry_run: isDry,
     force_cancel: force,
+    kind: kind || 'startup',
+    relance_17h: isRelance,
     limit: max,
     cancel_limit: maxCancel,
   });
@@ -605,11 +635,11 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
   const results = [];
   let cancelled = 0;
   let mailedReminder = 0;
-  let mailedContentieux = 0;
   let noEmail = 0;
-  let waiting24h = 0;
+  let waitingAttempts = 0;
+  let countedAttempts = 0;
 
-  logInfo('Échéancier — phase ANALYSE (mails)');
+  logInfo(isRelance ? 'Échéancier — phase RELANCE 17h' : 'Échéancier — phase ANALYSE (pas de mail hors 17h)');
   for (let i = 0; i < work.length; i += 1) {
     const cand = work[i];
     const classified = classifyUnpaid(cand);
@@ -640,51 +670,85 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       const email = apiContact.email || formContact.email || cand.email || '';
       const prenom = apiContact.firstName || formContact.firstName || '';
       const nom = apiContact.lastName || formContact.lastName || '';
+      const gym = apiContact.gym || cand.gym || 'minimes';
+      const offer = mapOffer({
+        productName: cand.product_name,
+        amountCents: cand.amount_cents,
+      });
+      const amountCents = cand.amount_cents || offer.cents || 0;
       touchMember(state, cand.member_id, {
         email,
         prenom,
         nom,
+        gym,
+        product_name: cand.product_name || '',
+        amount_cents: amountCents,
         last_unpaid_months: cand.months,
         last_seen_at: new Date().toISOString(),
       });
-      const mem = state.members[cand.member_id] || {};
+      let mem = state.members[cand.member_id] || {};
 
       logInfo(
-        `Échéancier — analyse ${i + 1}/${work.length} · ${cand.name || cand.member_id} · mail ${email ? 'ok' : 'absent'}`
+        `Échéancier — analyse ${i + 1}/${work.length} · ${cand.name || cand.member_id} · mail ${email ? 'ok' : 'absent'} · ${formatEurosFromCents(amountCents)}`
       );
       if (!email) {
         noEmail += 1;
         row.no_email = true;
       }
 
-      if (!isDry && email && classified.wantsReminder && !mem.reminder_at) {
-        const mail = await sendUnpaidReminder({ email, prenom });
-        if (mail.sent) {
-          mailedReminder += 1;
-          touchMember(state, cand.member_id, { reminder_at: new Date().toISOString() });
-        }
-        row.reminder = mail;
-      } else if (mem.reminder_at) {
-        row.reminder = { skipped: true, already: true };
+      if (shouldCountAttempt(mem, classified, { isRelance })) {
+        const next = Number(mem.attempt_count || 0) + 1;
+        touchMember(state, cand.member_id, {
+          attempt_count: next,
+          last_attempt_day: parisDayKey(),
+        });
+        mem = state.members[cand.member_id] || mem;
+        countedAttempts += 1;
+        row.attempt_count = next;
+      } else {
+        row.attempt_count = Number(mem.attempt_count || 0);
       }
 
-      if (!isDry && email && classified.wantsContentieux && !mem.contentieux_at) {
-        const mail = await sendContentieuxNotice({ email, prenom });
+      if (!isDry && email && shouldSendReminder(mem, classified, { isRelance })) {
+        let payUrl = '';
+        try {
+          payUrl = buildPayUrl({
+            member_id: cand.member_id,
+            email,
+            prenom,
+            nom,
+            amount_cents: amountCents,
+            gym,
+            offer: offer.key,
+          });
+        } catch (err) {
+          logWarn('Échéancier — lien paiement non généré', { error: err.message });
+        }
+        const mail = await sendUnpaidReminder({
+          email,
+          prenom,
+          amountCents,
+          offerLabel: offer.label,
+          payUrl,
+          gym,
+        });
         if (mail.sent) {
-          mailedContentieux += 1;
+          mailedReminder += 1;
           touchMember(state, cand.member_id, {
-            contentieux_at: new Date().toISOString(),
-            cancel_after: nextCancelAfter(),
+            reminder_at: new Date().toISOString(),
+            reminder_count: 1,
           });
         }
-        row.contentieux = mail;
-      } else if (mem.contentieux_at) {
-        row.contentieux = { skipped: true, already: true };
+        row.reminder = mail;
+        row.pay_url = Boolean(payUrl);
+      } else if (mem.reminder_at) {
+        row.reminder = { skipped: true, already: true };
       }
 
       row.contracts = contracts.map((c) => c.label?.slice(0, 60));
       row.eligible = eligible.map((c) => c.label?.slice(0, 60));
       row.email = email || null;
+      row.gym = gym;
     } catch (err) {
       logWarn('Échéancier — analyse membre échouée', { member_id: cand.member_id, error: err.message });
       row.error = err.message;
@@ -693,7 +757,7 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
   }
   saveState(state);
 
-  logInfo('Échéancier — phase RÉSILIATION (mois en cours)');
+  logInfo('Échéancier — phase RÉSILIATION (10e tentative)');
   for (let i = 0; i < work.length; i += 1) {
     if (cancelled >= maxCancel) break;
     const cand = work[i];
@@ -708,12 +772,9 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     const due = shouldCancel(mem, classified, { force });
     if (!due) {
       row.skipped = true;
-      row.reason = classified.wantsContentieux
-        ? mem.contentieux_at
-          ? 'wait_24h_contentieux'
-          : 'contentieux_non_envoye'
-        : 'reminder_only';
-      if (row.reason === 'wait_24h_contentieux') waiting24h += 1;
+      const attempts = Number(mem.attempt_count || 0);
+      row.reason = attempts > 0 ? `attente_tentative_${attempts}/10` : 'pas_encore_10e';
+      if (attempts > 0 && attempts < 10) waitingAttempts += 1;
       continue;
     }
     if (!row.eligible || !row.eligible.length) {
@@ -766,7 +827,7 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
   const skipped = results.filter((r) => r.skipped || r.dry_run).length;
   const failed = results.filter((r) => r.error).length;
   logInfo(
-    `Échéancier — scan terminé · ${candidates.length} impayés · ${mailedReminder} relances · ${mailedContentieux} contentieux · ${cancelled} résil · ${waiting24h} attente 24h · ${noEmail} sans email`
+    `Échéancier — scan terminé · ${candidates.length} impayés · ${mailedReminder} relances · ${cancelled} résil · ${waitingAttempts} en cours (tentatives) · ${countedAttempts} +1 aujourd’hui · ${noEmail} sans email`
   );
   logInfo('Échéancier — scan stats', {
     candidates: candidates.length,
@@ -775,10 +836,11 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     skipped,
     failed,
     mailed_reminder: mailedReminder,
-    mailed_contentieux: mailedContentieux,
-    waiting_24h: waiting24h,
+    waiting_attempts: waitingAttempts,
+    counted_attempts: countedAttempts,
     no_email: noEmail,
     dry_run: isDry,
+    kind: kind || 'startup',
   });
   return {
     ok: true,
@@ -786,8 +848,8 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     dry_run: isDry,
     cancelled,
     mailed_reminder: mailedReminder,
-    mailed_contentieux: mailedContentieux,
-    waiting_24h: waiting24h,
+    waiting_attempts: waitingAttempts,
+    counted_attempts: countedAttempts,
     no_email: noEmail,
     results,
   };

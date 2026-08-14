@@ -4,16 +4,20 @@
   "private": true,
   "description": "Bot Deciplus — résiliations, changements d’abonnement, scan échéancier impayés",
   "main": "start.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "start": "node start.js",
     "bootstrap": "node bootstrap.js",
-    "bot:run": "node bot/index.js"
+    "bot:run": "node bot/index.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "imapflow": "^1.6.6",
     "mailparser": "^3.9.15",
-    "playwright": "^1.51.1"
+    "playwright": "^1.55.0"
   }
 }

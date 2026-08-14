@@ -664,6 +664,7 @@ async function processJob(page, job) {
       action === 'cancel' ||
       action === 'verify_identity' ||
       action === 'echeancier' ||
+      action === 'encaisser' ||
       isChangeSale;
     if (!allowed) {
       throw new Error(`Bot ops refuse l’action « ${action} » (réservé aux ventes inscriptions)`);
@@ -686,8 +687,23 @@ async function processJob(page, job) {
       forceCancel:
         order.force_cancel === true ||
         String(order.force_cancel || process.env.ECHEANCIER_FORCE_CANCEL || '') === '1',
+      kind: order.echeancier_kind || '',
     });
     return { status: STATUS.SUCCESS, action: 'echeancier', ...scan };
+  }
+
+  if (order.action === 'encaisser') {
+    const { encaisserEcheance } = require('./encaisser-echeance');
+    const amountCents =
+      Number(order.amount_cents) ||
+      Math.round(Number(order.payment?.amount || 0) * 100) ||
+      0;
+    const result = await encaisserEcheance(page, {
+      memberId: order.deciplus_member_id,
+      name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim(),
+      amountCents,
+    });
+    return { status: result.ok ? STATUS.SUCCESS : STATUS.MANUAL_REVIEW, action: 'encaisser', ...result };
   }
 
   return processSaleJob(page, order, {
@@ -960,6 +976,7 @@ async function runLoop(once = false) {
         normalizeOrder({
           order_id: `ECHEANCIER-${reason.toUpperCase()}-${Date.now()}`,
           action: 'echeancier',
+          echeancier_kind: reason,
           product_name: 'Scan échéancier impayés',
           requires_payment: false,
           requires_iban: false,
@@ -1007,17 +1024,6 @@ async function runLoop(once = false) {
         // Premier tick à partir de l’heure cible (toute la fenêtre horaire) — évite de rater
         // le scan si le process redémarre après xx:01 ou si le tick tombe hors minute 0–1.
         if (p.hour === echeancierHour && lastScanDay !== dayKey) {
-          try {
-            const { loadState } = require('../lib/echeancier-state');
-            const last = Date.parse(loadState().last_scan_at || '');
-            if (Number.isFinite(last) && Date.now() - last < 2 * 3600 * 1000) {
-              lastScanDay = dayKey;
-              logInfo('Échéancier — cron 17h sauté (scan déjà fait il y a moins de 2h)');
-              return;
-            }
-          } catch {
-            /* ignore */
-          }
           lastScanDay = dayKey;
           enqueueScan('cron17h');
         }
@@ -1033,10 +1039,12 @@ async function runLoop(once = false) {
     const t = setInterval(tick, 30_000);
     if (t.unref) t.unref();
     if (startupScan) {
-      enqueueScan('startup');
       const now = zonedParts(new Date(), echeancierTz);
       if (now.hour === echeancierHour) {
         lastScanDay = `${now.year}-${String(now.month).padStart(2, '0')}-${String(now.day).padStart(2, '0')}`;
+        enqueueScan('cron17h');
+      } else {
+        enqueueScan('startup');
       }
     }
     tick();

@@ -51,7 +51,17 @@ const branch = process.env.BOT_REPO_BRANCH || 'main';
 const appName = process.env.BOT_APP_DIR || 'boxi-deci-bot-app';
 const APP_DIR = path.join(ROOT, appName);
 
-console.log('[BOXPLUS] Bootstrap BotHosting', { repo, branch, app: appName });
+console.log('[BOXPLUS] Bootstrap BotHosting', {
+  repo,
+  branch,
+  app: appName,
+  node: process.version,
+});
+if (Number(String(process.versions.node || '').split('.')[0]) < 24) {
+  console.warn(
+    `[BOXPLUS] WARN: Node 24 requis — actuel ${process.version}. Choisir Node.js 24 dans le panel BotHosting.`
+  );
+}
 
 if (!fs.existsSync(APP_DIR)) {
   run(`git clone --branch ${branch} ${repo} ${appName}`);

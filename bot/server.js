@@ -41,7 +41,8 @@ function createBotServer() {
         requires_payment: false,
         requires_iban: false,
         sale_type: 'none',
-        gym: 'minimes',
+          gym: 'minimes',
+          echeancier_kind: req.body?.kind || 'manual',
       });
       const result = enqueue(order);
       logInfo('Scan échéancier demandé', { order_id: order.order_id, force_cancel: Boolean(req.body?.force_cancel) });
