@@ -533,12 +533,6 @@ async function fetchMemberContactApi(page, memberId) {
   }
   const m = body?.response || body?.member || body?.data || body || {};
   const email = pickEmail(m) || pickEmail(body);
-  if (!email && body) {
-    logWarn('Échéancier — API membre sans email', {
-      member_id: memberId,
-      keys: Object.keys(m).slice(0, 40),
-    });
-  }
   return {
     email,
     firstName: String(m.name || m.prenom || m.firstName || '').trim(),
@@ -610,6 +604,10 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
   const state = loadState();
   const results = [];
   let cancelled = 0;
+  let mailedReminder = 0;
+  let mailedContentieux = 0;
+  let noEmail = 0;
+  let waiting24h = 0;
 
   logInfo('Échéancier — phase ANALYSE (mails)');
   for (let i = 0; i < work.length; i += 1) {
@@ -622,13 +620,6 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       classified,
     };
     try {
-      logInfo(`Échéancier — analyse ${i + 1}/${work.length}`, {
-        member_id: cand.member_id,
-        name: cand.name,
-        due_today: classified.dueToday,
-        current_month: classified.hasCurrent,
-        previous_month: classified.hasPrevious,
-      });
       if (!cand.member_id && cand.name) {
         const { searchMember } = require('./member');
         const found = await searchMember(page, cand.name).catch(() => ({ found: false }));
@@ -643,7 +634,9 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       }
       const apiContact = await fetchMemberContactApi(page, cand.member_id);
       const { eligible, contracts } = await memberHasEligibleContract(page, cand.member_id);
-      const formContact = await readMemberContact(page);
+      const formContact = apiContact.email
+        ? { email: '', firstName: '', lastName: '' }
+        : await readMemberContact(page);
       const email = apiContact.email || formContact.email || cand.email || '';
       const prenom = apiContact.firstName || formContact.firstName || '';
       const nom = apiContact.lastName || formContact.lastName || '';
@@ -656,21 +649,20 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       });
       const mem = state.members[cand.member_id] || {};
 
-      logInfo(`Échéancier — contact`, {
-        member_id: cand.member_id,
-        has_email: Boolean(email),
-        prenom: prenom || null,
-      });
+      logInfo(
+        `Échéancier — analyse ${i + 1}/${work.length} · ${cand.name || cand.member_id} · mail ${email ? 'ok' : 'absent'}`
+      );
       if (!email) {
-        logWarn('Échéancier — email introuvable sur la fiche', {
-          member_id: cand.member_id,
-          name: cand.name || `${prenom} ${nom}`.trim(),
-        });
+        noEmail += 1;
+        row.no_email = true;
       }
 
       if (!isDry && email && classified.wantsReminder && !mem.reminder_at) {
         const mail = await sendUnpaidReminder({ email, prenom });
-        if (mail.sent) touchMember(state, cand.member_id, { reminder_at: new Date().toISOString() });
+        if (mail.sent) {
+          mailedReminder += 1;
+          touchMember(state, cand.member_id, { reminder_at: new Date().toISOString() });
+        }
         row.reminder = mail;
       } else if (mem.reminder_at) {
         row.reminder = { skipped: true, already: true };
@@ -679,6 +671,7 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       if (!isDry && email && classified.wantsContentieux && !mem.contentieux_at) {
         const mail = await sendContentieuxNotice({ email, prenom });
         if (mail.sent) {
+          mailedContentieux += 1;
           touchMember(state, cand.member_id, {
             contentieux_at: new Date().toISOString(),
             cancel_after: nextCancelAfter(),
@@ -712,16 +705,24 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
       row.reason = 'already_cancelled';
       continue;
     }
-    if (!row.eligible || !row.eligible.length) {
-      row.skipped = true;
-      row.reason = row.reason || 'no_eligible_contract';
-      logWarn('Échéancier — aucun contrat actif à résilier', { member_id: cand.member_id });
-      continue;
-    }
     const due = shouldCancel(mem, classified, { force });
     if (!due) {
       row.skipped = true;
-      row.reason = classified.wantsContentieux ? 'wait_24h_contentieux' : 'reminder_only';
+      row.reason = classified.wantsContentieux
+        ? mem.contentieux_at
+          ? 'wait_24h_contentieux'
+          : 'contentieux_non_envoye'
+        : 'reminder_only';
+      if (row.reason === 'wait_24h_contentieux') waiting24h += 1;
+      continue;
+    }
+    if (!row.eligible || !row.eligible.length) {
+      row.skipped = true;
+      row.reason = row.reason || 'no_eligible_contract';
+      logWarn('Échéancier — dû pour résil mais aucun contrat actif', {
+        member_id: cand.member_id,
+        name: cand.name || null,
+      });
       continue;
     }
     if (isDry) {
@@ -759,18 +760,37 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     }
   }
   saveState(state);
+  state.last_scan_at = new Date().toISOString();
+  saveState(state);
 
   const skipped = results.filter((r) => r.skipped || r.dry_run).length;
   const failed = results.filter((r) => r.error).length;
-  logInfo('Échéancier — scan terminé', {
+  logInfo(
+    `Échéancier — scan terminé · ${candidates.length} impayés · ${mailedReminder} relances · ${mailedContentieux} contentieux · ${cancelled} résil · ${waiting24h} attente 24h · ${noEmail} sans email`
+  );
+  logInfo('Échéancier — scan stats', {
     candidates: candidates.length,
     processed: results.length,
     cancelled,
     skipped,
     failed,
+    mailed_reminder: mailedReminder,
+    mailed_contentieux: mailedContentieux,
+    waiting_24h: waiting24h,
+    no_email: noEmail,
     dry_run: isDry,
   });
-  return { ok: true, candidates: candidates.length, dry_run: isDry, cancelled, results };
+  return {
+    ok: true,
+    candidates: candidates.length,
+    dry_run: isDry,
+    cancelled,
+    mailed_reminder: mailedReminder,
+    mailed_contentieux: mailedContentieux,
+    waiting_24h: waiting24h,
+    no_email: noEmail,
+    results,
+  };
 }
 
 module.exports = {

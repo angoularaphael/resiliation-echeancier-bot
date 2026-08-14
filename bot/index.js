@@ -947,7 +947,14 @@ async function runLoop(once = false) {
 
   const enqueueScan = (reason = 'cron') => {
     try {
-      const { enqueue } = require('../lib/queue');
+      const { enqueue, listPending } = require('../lib/queue');
+      const already = listPending().some(
+        (j) => String(j.action || j.raw?.action || '').toLowerCase() === 'echeancier'
+      );
+      if (already) {
+        logInfo('Échéancier — job déjà en file, skip', { reason });
+        return;
+      }
       const { normalizeOrder } = require('../lib/normalize');
       enqueue(
         normalizeOrder({
@@ -1000,6 +1007,17 @@ async function runLoop(once = false) {
         // Premier tick à partir de l’heure cible (toute la fenêtre horaire) — évite de rater
         // le scan si le process redémarre après xx:01 ou si le tick tombe hors minute 0–1.
         if (p.hour === echeancierHour && lastScanDay !== dayKey) {
+          try {
+            const { loadState } = require('../lib/echeancier-state');
+            const last = Date.parse(loadState().last_scan_at || '');
+            if (Number.isFinite(last) && Date.now() - last < 2 * 3600 * 1000) {
+              lastScanDay = dayKey;
+              logInfo('Échéancier — cron 17h sauté (scan déjà fait il y a moins de 2h)');
+              return;
+            }
+          } catch {
+            /* ignore */
+          }
           lastScanDay = dayKey;
           enqueueScan('cron17h');
         }
