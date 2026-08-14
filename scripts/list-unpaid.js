@@ -35,7 +35,7 @@ if (process.env.DECIPLUS_HEADLESS == null) process.env.DECIPLUS_HEADLESS = 'true
 const { classifyUnpaid, currentYearMonth, previousYearMonth } = require('../lib/echeancier-policy');
 const { runWithSession, closeBrowser } = require('../bot/browser-pool');
 const { login } = require('../bot/auth');
-const { openEcheancierImpayes, parseUnpaidRows } = require('../bot/echeancier-scan');
+const { openEcheancierImpayes, collectUnpaidAcrossMonths } = require('../bot/echeancier-scan');
 
 (async () => {
   const now = new Date();
@@ -47,7 +47,7 @@ const { openEcheancierImpayes, parseUnpaidRows } = require('../bot/echeancier-sc
   const candidates = await runWithSession('list-unpaid', async (page) => {
     await login(page, { siteLabel: 'Minimes' });
     await openEcheancierImpayes(page);
-    return parseUnpaidRows(page);
+    return collectUnpaidAcrossMonths(page);
   });
 
   const rows = (candidates || []).map((c) => {
@@ -56,6 +56,7 @@ const { openEcheancierImpayes, parseUnpaidRows } = require('../bot/echeancier-sc
       cl.hasPrevious && cl.hasCurrent && Number(cl.unpaidCount) >= 2;
     return {
       member_id: c.member_id,
+      name: c.name || '',
       unpaid: cl.unpaidCount,
       months: cl.months,
       due_today: cl.dueToday,
@@ -78,8 +79,11 @@ const { openEcheancierImpayes, parseUnpaidRows } = require('../bot/echeancier-sc
   });
   console.log('\n=== 2 À LA SUITE (mois précédent + mois en cours) ===');
   console.log(two.length ? JSON.stringify(two, null, 2) : '(aucun)');
-  console.log('\n=== TOUS ===');
-  console.log(JSON.stringify(rows, null, 2));
+  const blanc = rows.filter((r) => /blanc/i.test(r.name || ''));
+  if (blanc.length) {
+    console.log('\n=== BLANC ===');
+    console.log(JSON.stringify(blanc, null, 2));
+  }
 
   await closeBrowser().catch(() => {});
   process.exit(0);

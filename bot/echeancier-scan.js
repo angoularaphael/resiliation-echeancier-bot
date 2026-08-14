@@ -99,61 +99,55 @@ async function toggleNamedCheck(page, nameRe, wantChecked) {
   return true;
 }
 
-/**
- * Passe l’échéancier sur Impayés, période = 2 mois glissants (pour 2 échéances à la suite).
- */
-async function applyUnpaidFilters(page) {
-  const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth() - 2, 1);
-  const fromStr = formatFrDate(from);
-  const toStr = formatFrDate(now);
+function nameKey(name) {
+  return String(name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
 
-  const start = page.getByPlaceholder(/Date de début/i).first();
-  const end = page.getByPlaceholder(/Date de fin/i).first();
-  if ((await start.count()) > 0) {
-    await start.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(400);
-    const prev = page
-      .locator(
-        '.el-date-range-picker:visible .arrow-left, .el-picker-panel:visible .el-icon-arrow-left, .el-date-range-picker:visible button'
-      )
-      .first();
-    if ((await prev.count()) > 0) await prev.click().catch(() => {});
-    await page.waitForTimeout(300);
-    const day1 = page
-      .locator('.el-date-range-picker:visible td.available, .el-picker-panel:visible td.available')
-      .filter({ hasText: /^1$/ })
-      .first();
-    if ((await day1.count()) > 0) await day1.click({ force: true }).catch(() => {});
-    await page.keyboard.press('Escape').catch(() => {});
-  }
-  if ((await end.count()) > 0) {
-    await end.click({ clickCount: 3, force: true }).catch(() => {});
-    await page.keyboard.type(toStr, { delay: 40 });
-    await page.keyboard.press('Enter').catch(() => {});
-  }
-  await page.evaluate(
-    ({ fromStr: f, toStr: t }) => {
-      const setVal = (ph, val) => {
-        const input = Array.from(document.querySelectorAll('input')).find(
-          (i) => (i.getAttribute('placeholder') || '') === ph
-        );
-        if (!input) return;
-        const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-        desc.set.call(input, val);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      };
-      setVal('Date de début', f);
-      setVal('Date de fin', t);
+function monthWindows(now = new Date()) {
+  const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+  const cur = new Date(now.getFullYear(), now.getMonth(), 1);
+  return [
+    {
+      from: formatFrDate(prev),
+      to: formatFrDate(prevEnd),
+      label: `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`,
     },
-    { fromStr, toStr }
-  );
+    {
+      from: formatFrDate(cur),
+      to: formatFrDate(now),
+      label: `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}`,
+    },
+  ];
+}
 
-  // Dropdown État : cases à cocher (A faire / Encaissé / Impayé / Suspendu / Envoyé)
+async function typeDateField(page, placeholderRe, valueFr) {
+  const input = page.getByPlaceholder(placeholderRe).first();
+  if ((await input.count()) === 0) return '';
+  await input.click({ clickCount: 3, force: true }).catch(() => {});
+  await page.keyboard.press('Control+A').catch(() => {});
+  await page.keyboard.type(valueFr, { delay: 25 });
+  await page.keyboard.press('Enter').catch(() => {});
+  await page.waitForTimeout(250);
+  return input.inputValue().catch(() => '');
+}
+
+async function setDateRange(page, fromStr, toStr) {
+  const gotFrom = await typeDateField(page, /Date de début/i, fromStr);
+  const gotTo = await typeDateField(page, /Date de fin/i, toStr);
+  logInfo('Échéancier — dates', { want_from: fromStr, got_from: gotFrom, want_to: toStr, got_to: gotTo });
+}
+
+async function applyEtatImpaye(page) {
   const etatTrigger = page
     .getByText(/éléments sélectionnés/i)
     .or(page.getByText(/^A faire$/i))
+    .or(page.getByText(/^Impay/i))
     .or(page.getByText(/^[ÉE]tat$/i))
     .first();
   if ((await etatTrigger.count()) > 0) await etatTrigger.click({ force: true }).catch(() => {});
@@ -175,8 +169,14 @@ async function applyUnpaidFilters(page) {
   const etatOk = await clickDrop(/^Impay/i, true);
   await page.keyboard.press('Escape').catch(() => {});
   await page.waitForTimeout(300);
+  logInfo('Échéancier — état Impayé', { etat: etatOk });
+  return etatOk;
+}
 
-  logInfo('Échéancier — filtres impayés', { from: fromStr, to: toStr, etat: etatOk });
+async function applyUnpaidFilters(page) {
+  await applyEtatImpaye(page);
+  const [first] = monthWindows();
+  await setDateRange(page, first.from, first.to);
   await clickActualiser(page);
 }
 
@@ -268,24 +268,38 @@ async function parseUnpaidRows(page) {
         t: new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).getTime(),
       }));
 
+      const cells = Array.from(tr.querySelectorAll('td, .cell, .el-table__cell'))
+        .map((td) => (td.innerText || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      const nameFromCell = cells.length >= 2 && /^\d{2}\/\d{2}\/\d{4}$/.test(cells[0]) ? cells[1] : '';
+      const nameFromText =
+        (text.match(
+          /^\d{2}\/\d{2}\/\d{4}\s+(.+?)\s+(?:OFFRE|Badge|Etudiants|Étudiants|\d+[.,]\d{2}\s*€)/i
+        ) || [])[1] || '';
+      const name = (nameFromCell || nameFromText).trim();
+
       const href =
-        tr.querySelector('a[href*="idj="], a[href*="idj%3D"]')?.getAttribute('href') || '';
-      let idj = (href.match(/idj[=%](\d+)/i) || [])[1] || null;
+        tr.querySelector('a[href*="idj="], a[href*="idj%3D"]')?.getAttribute('href') ||
+        tr.querySelector('a[href*="id="]')?.getAttribute('href') ||
+        '';
+      let idj = (href.match(/idj[=%](\d+)/i) || href.match(/[?&]id=(\d+)/i) || [])[1] || null;
       if (!idj) {
         const idm = text.match(/\b(1\d{4}|2\d{4})\b/);
         idj = idm ? idm[1] : null;
       }
       const email = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || '';
-      out.push({ text: text.slice(0, 240), member_id: idj, dates, email });
+      out.push({ text: text.slice(0, 240), member_id: idj, name, dates, email });
     }
     return out;
   });
 
   const byMember = new Map();
   for (const row of rows) {
-    if (!row.member_id) continue;
-    const cur = byMember.get(row.member_id) || {
-      member_id: row.member_id,
+    const key = row.member_id || (row.name ? `name:${nameKey(row.name)}` : null);
+    if (!key) continue;
+    const cur = byMember.get(key) || {
+      member_id: row.member_id || null,
+      name: row.name || '',
       unpaid_count: 0,
       samples: [],
       dateKeys: new Set(),
@@ -293,13 +307,15 @@ async function parseUnpaidRows(page) {
       email: '',
     };
     cur.unpaid_count += 1;
+    if (!cur.member_id && row.member_id) cur.member_id = row.member_id;
+    if (!cur.name && row.name) cur.name = row.name;
     if (cur.samples.length < 4) cur.samples.push(row.text);
     if (!cur.email && row.email) cur.email = row.email;
     for (const d of row.dates || []) {
       cur.dateKeys.add(d.key);
       cur.timestamps.push(d.t);
     }
-    byMember.set(row.member_id, cur);
+    byMember.set(key, cur);
   }
 
   const results = [];
@@ -307,6 +323,7 @@ async function parseUnpaidRows(page) {
     if (cur.unpaid_count < 1) continue;
     results.push({
       member_id: cur.member_id,
+      name: cur.name || '',
       unpaid_count: cur.unpaid_count,
       samples: cur.samples,
       months: [...cur.dateKeys].sort(),
@@ -315,6 +332,156 @@ async function parseUnpaidRows(page) {
     });
   }
   return results;
+}
+
+function mergeUnpaid(parts) {
+  const merged = new Map();
+  for (const row of parts) {
+    const key = row.member_id || (row.name ? `name:${nameKey(row.name)}` : null);
+    if (!key) continue;
+    const cur = merged.get(key) || {
+      member_id: row.member_id || null,
+      name: row.name || '',
+      unpaid_count: 0,
+      samples: [],
+      months: [],
+      timestamps: [],
+      email: '',
+    };
+    cur.unpaid_count += Number(row.unpaid_count || 0);
+    if (!cur.member_id && row.member_id) cur.member_id = row.member_id;
+    if (!cur.name && row.name) cur.name = row.name;
+    if (!cur.email && row.email) cur.email = row.email;
+    cur.months = [...new Set([...(cur.months || []), ...(row.months || [])])].sort();
+    cur.timestamps = [...(cur.timestamps || []), ...(row.timestamps || [])];
+    for (const s of row.samples || []) {
+      if (cur.samples.length < 6 && !cur.samples.includes(s)) cur.samples.push(s);
+    }
+    merged.set(key, cur);
+  }
+  return [...merged.values()];
+}
+
+function formatIsoDate(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function candidatesFromScheduleRows(rows) {
+  const byMember = new Map();
+  for (const r of rows || []) {
+    const memberId = String(r.memberId || r.member?.id || '');
+    if (!memberId) continue;
+    const date = String(r.paymentDate || r.date || '').slice(0, 10);
+    const [y, m, d] = date.split('-').map(Number);
+    if (!y || !m || !d) continue;
+    const name = [r.member?.name, r.member?.surname].filter(Boolean).join(' ').trim();
+    const cur = byMember.get(memberId) || {
+      member_id: memberId,
+      name,
+      unpaid_count: 0,
+      samples: [],
+      dateKeys: new Set(),
+      timestamps: [],
+      email: '',
+    };
+    cur.unpaid_count += 1;
+    if (!cur.name && name) cur.name = name;
+    cur.dateKeys.add(`${y}-${String(m).padStart(2, '0')}`);
+    cur.timestamps.push(new Date(y, m - 1, d).getTime());
+    if (cur.samples.length < 4) {
+      cur.samples.push(`${date} ${name} ${r.product?.name || ''} ${r.status || 'unpaid'}`.trim());
+    }
+    byMember.set(memberId, cur);
+  }
+  return [...byMember.values()].map((cur) => ({
+    member_id: cur.member_id,
+    name: cur.name || '',
+    unpaid_count: cur.unpaid_count,
+    samples: cur.samples,
+    months: [...cur.dateKeys].sort(),
+    timestamps: cur.timestamps,
+    email: cur.email || '',
+  }));
+}
+
+async function fetchPaymentSchedules(page, { fromIso, toIso, status = ['unpaid'] }) {
+  const params = new URLSearchParams({
+    from: fromIso,
+    to: toIso,
+    triggerHack: '0',
+    page: '1',
+    per_page: '1000',
+  });
+  for (const s of status) params.append('status[]', s);
+  const url = `https://api.deciplus.pro/staff/v1/payment-schedules?${params}`;
+
+  const evalRes = await page.evaluate(async (u) => {
+    const r = await fetch(u, { credentials: 'include' });
+    return { ok: r.ok, status: r.status, text: await r.text() };
+  }, url).catch(() => null);
+
+  let payload = null;
+  if (evalRes?.ok) {
+    try {
+      payload = JSON.parse(evalRes.text);
+    } catch {
+      payload = null;
+    }
+  }
+  if (!payload) {
+    const res = await page.context().request.get(url);
+    if (!res.ok()) throw new Error(`payment-schedules HTTP ${res.status()}`);
+    payload = await res.json();
+  }
+
+  const rows = [...(payload.rows || [])];
+  const total = Number(payload.count || rows.length);
+  let pageNo = 2;
+  while (rows.length < total && pageNo <= 10) {
+    params.set('page', String(pageNo));
+    const nextUrl = `https://api.deciplus.pro/staff/v1/payment-schedules?${params}`;
+    const next = await page.evaluate(async (u) => {
+      const r = await fetch(u, { credentials: 'include' });
+      return r.ok ? await r.json() : null;
+    }, nextUrl).catch(() => null);
+    if (!next?.rows?.length) break;
+    rows.push(...next.rows);
+    pageNo += 1;
+  }
+  return { count: total, rows };
+}
+
+async function collectUnpaidAcrossMonths(page) {
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const fromIso = formatIsoDate(from);
+  const toIso = formatIsoDate(now);
+  const { count, rows } = await fetchPaymentSchedules(page, {
+    fromIso,
+    toIso,
+    status: ['unpaid'],
+  });
+  const merged = candidatesFromScheduleRows(rows);
+  merged.sort((a, b) => {
+    const score = (r) => (r.months || []).length * 10 + Number(r.unpaid_count || 0);
+    return score(b) - score(a);
+  });
+  const consecutive = merged.filter((r) => (r.months || []).length >= 2);
+  logInfo('Échéancier — API impayés', {
+    from: fromIso,
+    to: toIso,
+    rows: rows.length,
+    count,
+    members: merged.length,
+    consecutive: consecutive.length,
+    sample: consecutive.slice(0, 8).map((r) => ({
+      id: r.member_id,
+      name: r.name,
+      months: r.months,
+      unpaid: r.unpaid_count,
+    })),
+  });
+  return merged;
 }
 
 async function memberHasEligibleContract(page, memberId) {
@@ -376,7 +543,7 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
 
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
-  const candidates = await parseUnpaidRows(page);
+  const candidates = await collectUnpaidAcrossMonths(page);
   const work = candidates.slice(0, max);
   logInfo('Échéancier — impayés détectés', {
     count: candidates.length,
@@ -405,10 +572,23 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
     try {
       logInfo(`Échéancier — analyse ${i + 1}/${work.length}`, {
         member_id: cand.member_id,
+        name: cand.name,
         due_today: classified.dueToday,
         current_month: classified.hasCurrent,
         previous_month: classified.hasPrevious,
       });
+      if (!cand.member_id && cand.name) {
+        const { searchMember } = require('./member');
+        const found = await searchMember(page, cand.name).catch(() => ({ found: false }));
+        if (found?.found && found.member_id) cand.member_id = found.member_id;
+      }
+      if (!cand.member_id) {
+        row.skipped = true;
+        row.reason = 'member_id_introuvable';
+        row.name = cand.name;
+        results.push(row);
+        continue;
+      }
       const { eligible, contracts } = await memberHasEligibleContract(page, cand.member_id);
       const contact = await readMemberContact(page);
       const email = contact.email || cand.email || '';
@@ -533,4 +713,5 @@ module.exports = {
   dryRun,
   openEcheancierImpayes,
   parseUnpaidRows,
+  collectUnpaidAcrossMonths,
 };
