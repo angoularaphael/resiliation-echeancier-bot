@@ -34,6 +34,152 @@ function isEligibleContractLabel(label) {
   return true;
 }
 
+function formatFrDate(d = new Date()) {
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+async function clickActualiser(page) {
+  const btn = page.getByRole('button', { name: /actualiser|appliquer|filtrer|rechercher/i }).first();
+  if ((await btn.count()) > 0) await btn.click().catch(() => {});
+  else
+    await page
+      .locator('button:has-text("Actualiser"), button:has-text("Appliquer")')
+      .first()
+      .click()
+      .catch(() => {});
+  await page.waitForTimeout(2000);
+}
+
+async function pickSelectOption(page, labelRe, optionRe) {
+  const item = page.locator('.el-form-item, .filter-item, .el-form-item__content').filter({ hasText: labelRe }).first();
+  const trigger = item.locator('.el-select, .el-input, input').first();
+  if ((await trigger.count()) === 0) {
+    const fallback = page.locator('.el-select').filter({ hasText: /A faire|Payé|Impay|Tous/i }).first();
+    if ((await fallback.count()) === 0) return false;
+    await fallback.click({ force: true }).catch(() => {});
+  } else {
+    await trigger.click({ force: true }).catch(() => {});
+  }
+  await page.waitForTimeout(500);
+  const opt = page
+    .locator(
+      '.el-select-dropdown:visible .el-select-dropdown__item, .el-select-dropdown__item, li[role="option"], .el-option'
+    )
+    .filter({ hasText: optionRe })
+    .first();
+  if ((await opt.count()) === 0 || !(await opt.isVisible().catch(() => false))) {
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
+  await opt.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(400);
+  return true;
+}
+
+async function fillDateField(page, placeholderRe, valueFr) {
+  const input = page.getByPlaceholder(new RegExp(placeholderRe, 'i')).first();
+  if ((await input.count()) === 0) return false;
+  await input.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(200);
+  await input.press('Control+A').catch(() => {});
+  await input.fill(valueFr).catch(() => {});
+  await page.keyboard.press('Enter').catch(() => {});
+  await page.waitForTimeout(300);
+  return true;
+}
+
+async function toggleNamedCheck(page, nameRe, wantChecked) {
+  const lab = page.locator('label, .el-checkbox, .el-radio, button, span').filter({ hasText: nameRe }).first();
+  if ((await lab.count()) === 0) return false;
+  const cls = (await lab.getAttribute('class').catch(() => '')) || '';
+  const checked = /is-checked|is-active|checked/i.test(cls);
+  if (checked !== wantChecked) await lab.click({ force: true }).catch(() => {});
+  return true;
+}
+
+/**
+ * Passe l’échéancier sur Impayés, période = 2 mois glissants (pour 2 échéances à la suite).
+ */
+async function applyUnpaidFilters(page) {
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+  const fromStr = formatFrDate(from);
+  const toStr = formatFrDate(now);
+
+  const start = page.getByPlaceholder(/Date de début/i).first();
+  const end = page.getByPlaceholder(/Date de fin/i).first();
+  if ((await start.count()) > 0) {
+    await start.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(400);
+    const prev = page
+      .locator(
+        '.el-date-range-picker:visible .arrow-left, .el-picker-panel:visible .el-icon-arrow-left, .el-date-range-picker:visible button'
+      )
+      .first();
+    if ((await prev.count()) > 0) await prev.click().catch(() => {});
+    await page.waitForTimeout(300);
+    const day1 = page
+      .locator('.el-date-range-picker:visible td.available, .el-picker-panel:visible td.available')
+      .filter({ hasText: /^1$/ })
+      .first();
+    if ((await day1.count()) > 0) await day1.click({ force: true }).catch(() => {});
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  if ((await end.count()) > 0) {
+    await end.click({ clickCount: 3, force: true }).catch(() => {});
+    await page.keyboard.type(toStr, { delay: 40 });
+    await page.keyboard.press('Enter').catch(() => {});
+  }
+  await page.evaluate(
+    ({ fromStr: f, toStr: t }) => {
+      const setVal = (ph, val) => {
+        const input = Array.from(document.querySelectorAll('input')).find(
+          (i) => (i.getAttribute('placeholder') || '') === ph
+        );
+        if (!input) return;
+        const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        desc.set.call(input, val);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      setVal('Date de début', f);
+      setVal('Date de fin', t);
+    },
+    { fromStr, toStr }
+  );
+
+  // Dropdown État : cases à cocher (A faire / Encaissé / Impayé / Suspendu / Envoyé)
+  const etatTrigger = page
+    .getByText(/éléments sélectionnés/i)
+    .or(page.getByText(/^A faire$/i))
+    .or(page.getByText(/^[ÉE]tat$/i))
+    .first();
+  if ((await etatTrigger.count()) > 0) await etatTrigger.click({ force: true }).catch(() => {});
+  await page.waitForTimeout(600);
+
+  const drop = page.locator('.el-select-dropdown:visible, .el-popper:visible, [role="listbox"]:visible').last();
+  const clickDrop = async (nameRe, wantOn) => {
+    const opt = drop.getByText(nameRe).first();
+    const fallback = page.getByText(nameRe).last();
+    const el = (await opt.count()) > 0 ? opt : fallback;
+    if ((await el.count()) === 0) return false;
+    const row = el.locator('xpath=ancestor::*[self::label or self::li or self::div][1]');
+    const cls = `${(await el.getAttribute('class').catch(() => '')) || ''} ${(await row.getAttribute('class').catch(() => '')) || ''}`;
+    const on = /is-checked|is-selected|checked/i.test(cls);
+    if (on !== wantOn) await el.click({ force: true }).catch(() => {});
+    return true;
+  };
+  await clickDrop(/^A faire$/i, false);
+  const etatOk = await clickDrop(/^Impay/i, true);
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(300);
+
+  logInfo('Échéancier — filtres impayés', { from: fromStr, to: toStr, etat: etatOk });
+  await clickActualiser(page);
+}
+
 async function openEcheancierImpayes(page) {
   const origin = new URL(page.url()).origin;
   const candidates = [
@@ -88,34 +234,7 @@ async function openEcheancierImpayes(page) {
     logInfo('Échéancier ouvert via menu', { url: page.url() });
   }
 
-  // Filtrer Impayés
-  const allStates = page.locator('text=/tous les états|tous les etats/i').first();
-  if ((await allStates.count()) > 0) await allStates.click().catch(() => {});
-  await page.waitForTimeout(400);
-
-  const unpaidCandidates = [
-    page.getByText(/^Impay/i).first(),
-    page.locator('label').filter({ hasText: /Impay/i }).first(),
-    page.locator('[title*="Impay" i]').first(),
-    page.locator('input[value*="Impay" i]').first(),
-  ];
-  for (const unpaid of unpaidCandidates) {
-    if ((await unpaid.count()) > 0 && (await unpaid.isVisible().catch(() => false))) {
-      await unpaid.click({ force: true }).catch(() => {});
-      break;
-    }
-  }
-  await page.waitForTimeout(300);
-
-  const apply = page.getByRole('button', { name: /appliquer|filtrer|valider|rechercher/i }).first();
-  if ((await apply.count()) > 0) await apply.click().catch(() => {});
-  else
-    await page
-      .locator('input[type="submit"][value*="Appliquer"], button:has-text("Appliquer")')
-      .first()
-      .click()
-      .catch(() => {});
-  await page.waitForTimeout(2000);
+  await applyUnpaidFilters(page);
 
   // Scroll pour charger plus de lignes (tables virtuelles)
   for (let i = 0; i < 4; i += 1) {
@@ -412,4 +531,6 @@ module.exports = {
   runEcheancierScan,
   isEligibleContractLabel,
   dryRun,
+  openEcheancierImpayes,
+  parseUnpaidRows,
 };
