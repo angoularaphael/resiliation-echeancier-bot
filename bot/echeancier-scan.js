@@ -498,28 +498,80 @@ async function memberHasEligibleContract(page, memberId) {
   return { contracts, eligible };
 }
 
+function pickEmail(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const k of ['email', 'jemail', 'mail', 'eMail', 'Email', 'courriel']) {
+    const v = String(obj[k] || '').trim();
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return v;
+  }
+  return '';
+}
+
+async function fetchMemberContactApi(page, memberId) {
+  if (!memberId) return { email: '', firstName: '', lastName: '' };
+  const { getAccessToken } = require('./auth');
+  const token = await getAccessToken(page);
+  const url = `https://api.deciplus.pro/staff/v1/member/${memberId}`;
+  let body = null;
+  if (token) {
+    const res = await page.context().request.get(url, {
+      headers: {
+        'x-access-token': token,
+        'Deciplus-Client-Type': 'manager',
+        Accept: 'application/json',
+      },
+    });
+    if (res.ok()) body = await res.json().catch(() => null);
+  }
+  if (!body) {
+    body = await page
+      .evaluate(async (u) => {
+        const r = await fetch(u, { credentials: 'include' });
+        return r.ok ? r.json() : null;
+      }, url)
+      .catch(() => null);
+  }
+  const m = body?.response || body?.member || body?.data || body || {};
+  const email = pickEmail(m) || pickEmail(body);
+  if (!email && body) {
+    logWarn('Échéancier — API membre sans email', {
+      member_id: memberId,
+      keys: Object.keys(m).slice(0, 40),
+    });
+  }
+  return {
+    email,
+    firstName: String(m.name || m.prenom || m.firstName || '').trim(),
+    lastName: String(m.surname || m.nom || m.lastName || '').trim(),
+  };
+}
+
 async function readMemberContact(page) {
   const { getMemberFormContext } = require('./member');
   const ctx = await getMemberFormContext(page, { waitMs: 5000 });
-  const email = await ctx
-    .locator('input[name="email"]:not(#i_email)')
-    .first()
-    .inputValue()
-    .catch(() => '');
-  const firstName = await ctx
-    .locator('input[name="prenom"]:not(#i_prenom)')
-    .first()
-    .inputValue()
-    .catch(() => '');
-  const lastName = await ctx
-    .locator('input[name="nom"]:not(#i_nom)')
-    .first()
-    .inputValue()
-    .catch(() => '');
+  const read = async (sels) => {
+    for (const sel of sels) {
+      const el = ctx.locator(sel).first();
+      if ((await el.count()) === 0) continue;
+      const v = String((await el.inputValue().catch(() => '')) || '').trim();
+      if (v) return v;
+    }
+    return '';
+  };
+  let email = await read([
+    'input[name="jemail"]',
+    'input[name="email"]:not(#i_email)',
+    'input[type="email"]:not(#i_email)',
+    '#jemail',
+  ]);
+  if (!email) {
+    const blob = await ctx.locator('body').innerText().catch(() => '');
+    email = (String(blob).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || '';
+  }
   return {
-    email: String(email || '').trim(),
-    firstName: String(firstName || '').trim(),
-    lastName: String(lastName || '').trim(),
+    email,
+    firstName: await read(['input[name="prenom"]:not(#i_prenom)', '#prenom']),
+    lastName: await read(['input[name="nom"]:not(#i_nom)', '#nom']),
   };
 }
 
@@ -589,20 +641,34 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
         results.push(row);
         continue;
       }
+      const apiContact = await fetchMemberContactApi(page, cand.member_id);
       const { eligible, contracts } = await memberHasEligibleContract(page, cand.member_id);
-      const contact = await readMemberContact(page);
-      const email = contact.email || cand.email || '';
-      const prenom = contact.firstName || '';
+      const formContact = await readMemberContact(page);
+      const email = apiContact.email || formContact.email || cand.email || '';
+      const prenom = apiContact.firstName || formContact.firstName || '';
+      const nom = apiContact.lastName || formContact.lastName || '';
       touchMember(state, cand.member_id, {
         email,
         prenom,
-        nom: contact.lastName || '',
+        nom,
         last_unpaid_months: cand.months,
         last_seen_at: new Date().toISOString(),
       });
       const mem = state.members[cand.member_id] || {};
 
-      if (!isDry && classified.wantsReminder && !mem.reminder_at) {
+      logInfo(`Échéancier — contact`, {
+        member_id: cand.member_id,
+        has_email: Boolean(email),
+        prenom: prenom || null,
+      });
+      if (!email) {
+        logWarn('Échéancier — email introuvable sur la fiche', {
+          member_id: cand.member_id,
+          name: cand.name || `${prenom} ${nom}`.trim(),
+        });
+      }
+
+      if (!isDry && email && classified.wantsReminder && !mem.reminder_at) {
         const mail = await sendUnpaidReminder({ email, prenom });
         if (mail.sent) touchMember(state, cand.member_id, { reminder_at: new Date().toISOString() });
         row.reminder = mail;
@@ -610,7 +676,7 @@ async function runEcheancierScan(page, { limit = 30, cancelLimit, forceCancel = 
         row.reminder = { skipped: true, already: true };
       }
 
-      if (!isDry && classified.wantsContentieux && !mem.contentieux_at) {
+      if (!isDry && email && classified.wantsContentieux && !mem.contentieux_at) {
         const mail = await sendContentieuxNotice({ email, prenom });
         if (mail.sent) {
           touchMember(state, cand.member_id, {
@@ -714,4 +780,5 @@ module.exports = {
   openEcheancierImpayes,
   parseUnpaidRows,
   collectUnpaidAcrossMonths,
+  fetchMemberContactApi,
 };
