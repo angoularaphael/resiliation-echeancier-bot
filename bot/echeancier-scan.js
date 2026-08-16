@@ -731,6 +731,7 @@ async function runEcheancierScan(
           offerLabel: offer.label,
           payUrl,
           gym,
+          attemptCount: row.attempt_count,
         });
         if (mail.sent) {
           mailedReminder += 1;
