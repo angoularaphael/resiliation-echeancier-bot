@@ -553,12 +553,14 @@ async function findMemberByIdentity(page, identity = {}, options = {}) {
   if (matchFields.includes('phone') && !phone) {
     return { found: false, reason: 'missing_phone', mismatch_fields: ['phone'] };
   }
-  if (!identity.last_name || !identity.first_name || !identity.birthdate) {
+  if (!identity.last_name || !identity.first_name) {
     const missing = [];
     if (!identity.last_name) missing.push('last_name');
     if (!identity.first_name) missing.push('first_name');
-    if (!identity.birthdate) missing.push('birthdate');
     return { found: false, reason: 'missing_identity', mismatch_fields: missing };
+  }
+  if (matchFields.includes('birthdate') && !identity.birthdate) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: ['birthdate'] };
   }
 
   // Email d’abord (plus unique) — stop dès le 1er hit (pas de recherches inutiles)

@@ -94,5 +94,21 @@
     "confirmer_resiliation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer",
     "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail",
     "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
+  },
+  "member_migrate": {
+    "icon": "div.iconify:has-text(\"Changer de site\"), div.iconify:has-text(\"Migration\"), [aria-label*=\"Changer de site\"], [title*=\"Changer de site\"], text=/Changer (de |le )?site/i, button:has-text(\"Changer de site\")",
+    "picker": ".ari-select, select[name=\"idz\"], .el-select",
+    "site_minimes": "Minimes",
+    "confirm": "button:has-text(\"Changer le site de ce membre\"), button:has-text(\"Changer le site\"), text=/Changer le site de ce membre/i"
+  },
+  "member_unpaid": {
+    "row": "tr:has-text(\"Impayé\"), tr:has-text(\"Impayée\"), tr:has-text(\"Rejeté\"), .echeance:has-text(\"Impay\"), div:has-text(\"Impayé\")",
+    "delete": "button:has-text(\"Supprimer\"), a:has-text(\"Supprimer\"), input[value=\"Supprimer\"], button:has-text(\"Annuler l'échéance\")",
+    "confirm": "button:has-text(\"Confirmer\"), button:has-text(\"Oui\"), button.ari-button:has-text(\"Confirmer\")"
+  },
+  "contract_dates": {
+    "valide_du": ":text(\"Valide du\") >> xpath=following::input[1]",
+    "valide_au": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][2] >> input",
+    "echeance": "text=/prochaine [eé]ch[eé]ance/i"
   }
 }

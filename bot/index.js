@@ -251,7 +251,7 @@ async function processCancelJob(page, order) {
       <p>Nous avons bien reçu votre demande de résiliation, mais <strong>les informations renseignées ne correspondent pas</strong> à celles enregistrées sur votre fiche adhérent Boxing Center.</p>
       <p>Pour des raisons de sécurité, une seule information incorrecte (nom, prénom, téléphone ou date de naissance) empêche le traitement automatique.</p>
       ${fields.length ? `<p>Champ(s) en cause : <strong>${fields.join(', ')}</strong>.</p>` : ''}
-      <p>Merci de vérifier vos informations puis de renouveler la demande depuis <a href="https://box-plus.vercel.app/gerer-abonnement">Gérer mon abonnement</a>.</p>
+      <p>Merci de vérifier vos informations puis de renouveler la demande depuis <a href="https://boutique.boxingcenter.fr/gerer-abonnement">Gérer mon abonnement</a>.</p>
       <p>Sportivement,<br/>Boxing Center</p>`;
     try {
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -665,6 +665,7 @@ async function processJob(page, job) {
       action === 'verify_identity' ||
       action === 'echeancier' ||
       action === 'encaisser' ||
+      action === 'balma_switch' ||
       isChangeSale;
     if (!allowed) {
       throw new Error(`Bot ops refuse l’action « ${action} » (réservé aux ventes inscriptions)`);
@@ -704,6 +705,11 @@ async function processJob(page, job) {
       amountCents,
     });
     return { status: result.ok ? STATUS.SUCCESS : STATUS.MANUAL_REVIEW, action: 'encaisser', ...result };
+  }
+
+  if (order.action === 'balma_switch') {
+    const { runBalmaSwitch } = require('./migrate-gym');
+    return runBalmaSwitch(page, order);
   }
 
   return processSaleJob(page, order, {

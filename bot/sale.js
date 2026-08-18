@@ -2188,6 +2188,20 @@ async function applyConfigModal(page, productConfig, memberId = null) {
     await ensurePaiementComptantOff(page);
   }
 
+  if (productConfig.restore_start_fr || productConfig.restore_end_fr) {
+    const dateCtx = await resolveDeciplusWorkPage(page);
+    if (productConfig.restore_start_fr) {
+      await badgeDomEvaluate(dateCtx, 'fillDu', productConfig.restore_start_fr).catch(() => false);
+    }
+    if (productConfig.restore_end_fr) {
+      await badgeDomEvaluate(dateCtx, 'fillAu', productConfig.restore_end_fr).catch(() => false);
+    }
+    logInfo('Vente Deciplus — dates abo restaurées', {
+      start: productConfig.restore_start_fr,
+      end: productConfig.restore_end_fr,
+    });
+  }
+
   if (
     productConfig.requires_iban &&
     !productConfig.skip_rib_prompt &&
