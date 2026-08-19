@@ -117,102 +117,176 @@ async function snapshotContracts(page, memberId, gymConfig) {
   return snapshots;
 }
 
-async function clickMigrateIcon(page) {
-  const sel = getSelectors().member_migrate || {};
-  const iconSel =
-    sel.icon ||
-    'div.iconify:has-text("Changer de site"), text=/Changer (de |le )?site/i';
-  for (const ctx of getScopes(page)) {
-    const icon = ctx.locator(iconSel).first();
-    if ((await icon.count()) > 0 && (await icon.isVisible().catch(() => false))) {
-      await icon.click({ force: true });
-      await randomDelay(500, 900);
-      return true;
+async function clickFirstVisible(builders) {
+  for (const build of builders) {
+    try {
+      const loc = build();
+      const n = await loc.count();
+      if (n > 0 && (await loc.first().isVisible().catch(() => false))) {
+        await loc.first().click({ force: true });
+        await randomDelay(500, 900);
+        return true;
+      }
+    } catch {
+      /* sélecteur invalide sur ce contexte */
     }
   }
-  const byRole = page.getByText(/changer (de |le )?site|migration/i).first();
-  if ((await byRole.count()) > 0 && (await byRole.isVisible().catch(() => false))) {
-    await byRole.click({ force: true });
+  return false;
+}
+
+async function clickMigrateIcon(page) {
+  const builders = [];
+  for (const ctx of getScopes(page)) {
+    builders.push(
+      () => ctx.locator('div.bouton_change_zone'),
+      () => ctx.locator('[title="Migrer ce membre"]'),
+      () => ctx.locator('[onclick="sendToZone"], [onclick*="sendToZone("]')
+    );
+  }
+  return clickFirstVisible(builders);
+}
+
+async function openMoveMemberPage(page, memberId) {
+  const { gotoDeciplus } = require('./auth');
+  const qs = `moveMember.php?idj=${encodeURIComponent(memberId)}`;
+  const paths = [
+    `nextgen/legacy?path=${encodeURIComponent(`/${qs}`)}`,
+    qs,
+  ];
+  for (const rel of paths) {
+    await gotoDeciplus(page, rel).catch(() => {});
     await randomDelay(500, 900);
-    return true;
+    for (const ctx of getScopes(page)) {
+      if ((await ctx.locator('select#idz, #moveMemCheck').count().catch(() => 0)) > 0) {
+        return true;
+      }
+    }
   }
   return false;
 }
 
 async function pickMinimesInMigratePicker(page, gymConfig = {}) {
   const label = gymConfig.deciplus_label || 'Minimes';
-  const sel = getSelectors().member_migrate || {};
+  const zoneId = String(gymConfig.deciplus_zone_id || '2');
+  const needle = new RegExp(String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   for (const ctx of getScopes(page)) {
-    const picker = ctx.locator(sel.picker || '.ari-select, select[name="idz"]').first();
+    const picker = ctx.locator('select#idz').first();
     if ((await picker.count()) === 0) continue;
-    const tag = await picker.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
-    if (tag === 'select') {
-      const ok = await picker
-        .selectOption({ label })
-        .then(() => true)
-        .catch(() => false);
-      if (ok) return true;
-      await picker.selectOption({ value: String(gymConfig.deciplus_zone_id || '2') }).catch(() => {});
+    const byValue = await picker.selectOption(zoneId).then(() => true).catch(() => false);
+    if (byValue) {
+      logInfo('Site destination Deciplus (idz)', { zone_id: zoneId, site: label });
       return true;
     }
-    await picker.click({ force: true }).catch(() => {});
-    await randomDelay(300, 500);
-    const opt = ctx.getByText(new RegExp(label, 'i')).first();
-    if ((await opt.count()) > 0) {
-      await opt.click({ force: true }).catch(() => {});
+    const options = await picker.locator('option').all();
+    for (const opt of options) {
+      const text = ((await opt.textContent().catch(() => '')) || '').trim();
+      if (!needle.test(text)) continue;
+      const value = await opt.getAttribute('value');
+      if (!value) continue;
+      await picker.selectOption(value);
+      logInfo('Site destination Deciplus (label)', { site: text, zone_id: value });
       return true;
     }
-  }
-  const opt = page.getByText(/minimes/i).first();
-  if ((await opt.count()) > 0 && (await opt.isVisible().catch(() => false))) {
-    await opt.click({ force: true });
-    return true;
   }
   return false;
 }
 
 async function confirmMigrate(page) {
-  const sel = getSelectors().member_migrate || {};
-  const confirmSel =
-    sel.confirm || 'button:has-text("Changer le site de ce membre")';
+  page.once('dialog', async (dialog) => {
+    await dialog.accept().catch(() => {});
+  });
+  const builders = [];
   for (const ctx of getScopes(page)) {
-    const btn = ctx.locator(confirmSel).first();
-    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      await btn.click({ force: true });
-      await randomDelay(800, 1400);
-      return true;
-    }
+    builders.push(
+      () => ctx.locator('input.fichemembre_button[value*="Changer le site"]'),
+      () => ctx.locator('input[onclick*="sendToZone"][value*="Changer"]'),
+      () => ctx.locator('input[type="button"][value*="Changer le site de ce membre"]')
+    );
   }
-  const byText = page.getByRole('button', { name: /changer le site/i }).first();
-  if ((await byText.count()) > 0) {
-    await byText.click({ force: true }).catch(() => {});
-    await randomDelay(800, 1400);
-    return true;
-  }
-  return false;
+  const ok = await clickFirstVisible(builders);
+  if (ok) await randomDelay(1000, 1600);
+  return ok;
 }
 
 async function migrateMemberToGym(page, memberId, gymConfig) {
-  await openMemberCheck(page, memberId, gymConfig);
-  await randomDelay(500, 800);
-  const opened = await clickMigrateIcon(page);
-  if (!opened) {
-    throw new Error('Icône migration / changer de site introuvable sur la fiche');
+  await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+  await randomDelay(400, 700);
+  let onMovePage = false;
+  if (await clickMigrateIcon(page)) {
+    await randomDelay(700, 1200);
+    for (const ctx of getScopes(page)) {
+      if ((await ctx.locator('select#idz, #moveMemCheck').count().catch(() => 0)) > 0) {
+        onMovePage = true;
+        break;
+      }
+    }
   }
+  if (!onMovePage) {
+    onMovePage = await openMoveMemberPage(page, memberId);
+  }
+  if (!onMovePage) {
+    const api = await migrateMemberViaApi(page, memberId, gymConfig);
+    if (api.ok) {
+      logInfo('Migration salle Deciplus', {
+        member_id: memberId,
+        to: gymConfig.deciplus_label || 'Minimes',
+        via: api.via,
+      });
+      return { ok: true, gym: gymConfig.key || 'minimes', via: api.via };
+    }
+    throw new Error('Page CHANGEMENT DE SITE (moveMember.php) introuvable');
+  }
+
   const picked = await pickMinimesInMigratePicker(page, gymConfig);
   if (!picked) {
-    logWarn('Site Minimes non sélectionné dans le picker — tentative confirmer quand même');
+    logWarn('Site Minimes non sélectionné dans #idz — on tente le bouton quand même');
   }
   const confirmed = await confirmMigrate(page);
   if (!confirmed) {
+    const api = await migrateMemberViaApi(page, memberId, gymConfig);
+    if (api.ok) {
+      return { ok: true, gym: gymConfig.key || 'minimes', via: api.via };
+    }
     throw new Error('Bouton « Changer le site de ce membre » introuvable');
   }
   logInfo('Migration salle Deciplus', {
     member_id: memberId,
     to: gymConfig.deciplus_label || 'Minimes',
     zone_id: gymConfig.deciplus_zone_id || '2',
+    via: 'moveMember.php',
   });
   return { ok: true, gym: gymConfig.key || 'minimes' };
+}
+
+async function migrateMemberViaApi(page, memberId, gymConfig) {
+  const { getAccessToken } = require('./auth');
+  const token = await getAccessToken(page);
+  if (!token) return { ok: false, reason: 'no_token' };
+  const zoneId = Number(gymConfig.deciplus_zone_id || 2);
+  const headers = {
+    'x-access-token': token,
+    'Deciplus-Client-Type': 'manager',
+    'Content-Type': 'application/json',
+  };
+  const url = `https://api.deciplus.pro/staff/v1/member/${memberId}`;
+  for (const method of ['PATCH', 'PUT']) {
+    const res = await page.context().request.fetch(url, {
+      method,
+      headers,
+      data: { zoneId },
+    });
+    const status = res.status();
+    logInfo('Migration salle API Deciplus', { member_id: memberId, method, status, zoneId });
+    if (status >= 200 && status < 300) return { ok: true, via: `api_${method.toLowerCase()}`, status };
+  }
+  const legacy = await page.context().request.fetch(url, {
+    method: 'PUT',
+    headers: { ...headers, 'Deciplus-Client-Type': 'manager_legacy' },
+    data: { zoneId },
+  });
+  logInfo('Migration salle API legacy', { member_id: memberId, status: legacy.status(), zoneId });
+  if (legacy.ok()) return { ok: true, via: 'api_legacy', status: legacy.status() };
+  return { ok: false, reason: `api_${legacy.status()}` };
 }
 
 async function restoreContracts(page, memberId, snapshots, gymConfig, order) {
@@ -280,7 +354,10 @@ async function runBalmaSwitch(page, order) {
   const gymConfig = getGymConfig(order.gym || 'minimes') || getGymConfig('minimes');
   gymConfig.key = order.gym || 'minimes';
 
-  const match = await findBalmaMember(page, identity);
+  const knownId = String(order.deciplus_member_id || order.customer?.deciplus_member_id || '').trim();
+  const match = knownId
+    ? { found: true, member_id: knownId }
+    : await findBalmaMember(page, identity);
   if (!match.found) {
     return {
       status: STATUS.MANUAL_REVIEW,
@@ -295,15 +372,20 @@ async function runBalmaSwitch(page, order) {
   }
   const memberId = match.member_id;
 
-  const snapshots = await snapshotContracts(page, memberId, gymConfig);
+  const snapshots =
+    Array.isArray(order.snapshots) && order.snapshots.length
+      ? order.snapshots
+      : await snapshotContracts(page, memberId, gymConfig);
 
-  await cancelSale(page, memberId, {
-    cancelDate: order.cancel_date || formatFrDate(new Date()),
-    cancel_reason: 'balma_switch',
-    skipComptantGuard: true,
-  }).catch((err) => {
-    logWarn('Résiliation avant migration — poursuite', { error: err.message, member_id: memberId });
-  });
+  if (!order.skip_cancel) {
+    await cancelSale(page, memberId, {
+      cancelDate: order.cancel_date || formatFrDate(new Date()),
+      cancel_reason: 'balma_switch',
+      skipComptantGuard: true,
+    }).catch((err) => {
+      logWarn('Résiliation avant migration — poursuite', { error: err.message, member_id: memberId });
+    });
+  }
 
   const unpaid = await deleteUnpaidOnMember(page, memberId, gymConfig).catch((err) => {
     logWarn('Nettoyage impayés — poursuite', { error: err.message, member_id: memberId });

@@ -96,10 +96,11 @@
     "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
   },
   "member_migrate": {
-    "icon": "div.iconify:has-text(\"Changer de site\"), div.iconify:has-text(\"Migration\"), [aria-label*=\"Changer de site\"], [title*=\"Changer de site\"], text=/Changer (de |le )?site/i, button:has-text(\"Changer de site\")",
-    "picker": ".ari-select, select[name=\"idz\"], .el-select",
+    "icon": "div.bouton_change_zone, [title=\"Migrer ce membre\"], [onclick*=\"sendToZone\"]",
+    "page": "moveMember.php",
+    "picker": "select#idz",
     "site_minimes": "Minimes",
-    "confirm": "button:has-text(\"Changer le site de ce membre\"), button:has-text(\"Changer le site\"), text=/Changer le site de ce membre/i"
+    "confirm": "input.fichemembre_button[value*=\"Changer le site de ce membre\"]"
   },
   "member_unpaid": {
     "row": "tr:has-text(\"Impayé\"), tr:has-text(\"Impayée\"), tr:has-text(\"Rejeté\"), .echeance:has-text(\"Impay\"), div:has-text(\"Impayé\")",
