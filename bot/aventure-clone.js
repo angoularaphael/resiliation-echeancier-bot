@@ -10,7 +10,7 @@ const { applyMinimesDuplicateIdentity } = require('../lib/aventure-duplicate-add
 const { switchDeciplusSite } = require('./deciplus-zone');
 const {
   findMemberByIdentity,
-  AVENTURE_MATCH_FIELDS,
+  findAventureBalmaMember,
   openMemberEditForm,
   openNewMemberForm,
   fillMemberForm,
@@ -23,17 +23,22 @@ const {
 } = require('./member');
 
 async function findBalmaMember(page, identity) {
-  const last = String(identity.last_name || '').trim();
-  const first = String(identity.first_name || '').trim();
-  const missing = [];
-  if (!last) missing.push('last_name');
-  if (!first) missing.push('first_name');
-  if (!identity.birthdate) missing.push('birthdate');
-  if (!String(identity.email || '').trim()) missing.push('email');
-  if (missing.length) {
-    return { found: false, reason: 'missing_identity', mismatch_fields: missing };
+  return findAventureBalmaMember(page, identity);
+}
+
+function balmaSwitchMatchError(match) {
+  if (match.reason === 'need_email') {
+    return 'Plusieurs fiches Balma correspondent à ce nom. Indique l’email de ta fiche Balma.';
   }
-  return findMemberByIdentity(page, identity, { matchFields: AVENTURE_MATCH_FIELDS });
+  if (match.reason === 'identity_mismatch') {
+    return match.mismatch_fields?.includes('email')
+      ? 'Plusieurs fiches correspondent : l’email ne matche aucune d’entre elles.'
+      : 'Nom, prénom ou date de naissance ne correspondent pas à une fiche Balma.';
+  }
+  if (match.reason === 'missing_identity') {
+    return 'Merci de renseigner nom, prénom et date de naissance.';
+  }
+  return 'Fiche adhérent introuvable sur Balma (nom, prénom, date de naissance).';
 }
 
 async function readInput(scope, selector) {
@@ -289,15 +294,10 @@ async function runBalmaSwitch(page, order) {
     ? { found: true, member_id: knownId }
     : await findBalmaMember(page, identity);
   if (!match.found) {
-    const mismatch = match.reason === 'identity_mismatch';
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'balma_switch',
-      error: mismatch
-        ? 'Nom, prénom, date de naissance et email doivent être exactement ceux de ta fiche Balma.'
-        : match.reason === 'missing_identity'
-          ? 'Merci de renseigner nom, prénom, date de naissance et email (identiques à ta fiche Balma).'
-          : 'Fiche adhérent introuvable sur Balma (nom, prénom, date de naissance et email).',
+      error: balmaSwitchMatchError(match),
       mismatch: true,
       mismatch_reason: match.reason,
       mismatch_fields: match.mismatch_fields || [],

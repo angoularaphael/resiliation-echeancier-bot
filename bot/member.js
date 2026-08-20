@@ -12,6 +12,11 @@ const {
   isSearchableMemberEmail,
 } = require('../lib/deciplus-member-format');
 
+const SCOPED_RESULT_LINKS =
+  'table a[href*="idj="], table a[href*="idj%3D"], ' +
+  '#liste a[href*="idj="], .liste a[href*="idj="], ' +
+  'tr a[href*="joueurs.php"], tr a[href*="check.php"]';
+
 function navTimeout() {
   return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
 }
@@ -395,6 +400,107 @@ async function searchMemberByName(page, lastName, firstName) {
   return hit;
 }
 
+async function listScopedSearchMemberIds(page) {
+  const ids = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const id = String(raw || '');
+    if (!/^\d+$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  const fromUrl = await extractMemberIdFromAnyContext(page);
+  const urlHay = expandDeciplusUrl(page.url());
+  if (fromUrl && /joueurs\.php|check\.php/i.test(urlHay)) add(fromUrl);
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  for (const ctx of contexts) {
+    const links = ctx.locator(SCOPED_RESULT_LINKS);
+    const count = await links.count().catch(() => 0);
+    for (let i = 0; i < Math.min(count, 12); i += 1) {
+      const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
+      add(extractMemberIdFromUrl(href));
+    }
+  }
+  return ids;
+}
+
+async function listNameSearchMemberIds(page, lastName, firstName) {
+  const last = nameForDeciplusSearch(lastName);
+  const first = nameForDeciplusSearch(firstName);
+  if (!last && !first) return [];
+  const searchOnce = async (ln, fn) => {
+    await navigateToMembers(page);
+    await clearMemberSearchFields(page);
+    const ctx = await getMemberSearchContext(page);
+    const sel = getSelectors();
+    if (ln) await fillFirst(ctx, sel.quick_search_selectors?.nom || '#i_nom', ln);
+    if (fn) await fillFirst(ctx, sel.quick_search_selectors?.prenom || '#i_prenom', fn);
+    await submitMemberSearch(page);
+    return listScopedSearchMemberIds(page);
+  };
+  let ids = await searchOnce(last, first);
+  if (!ids.length && last && first) ids = await searchOnce(last, '');
+  return ids;
+}
+
+/** 1 fiche nom/prénom/naissance → OK ; plusieurs → email pour départager. */
+function pickAventureBalmaMatch(matches = [], email) {
+  if (!matches.length) return { found: false, reason: 'not_found', mismatch_fields: [] };
+  if (matches.length === 1) return { found: true, member_id: String(matches[0].member_id) };
+  const searchable = isSearchableMemberEmail(email);
+  if (!searchable) {
+    return {
+      found: false,
+      reason: 'need_email',
+      mismatch_fields: ['email'],
+      candidates: matches.length,
+    };
+  }
+  const picked = matches.find((m) => emailsMatch(m.email, searchable));
+  if (!picked) {
+    return { found: false, reason: 'identity_mismatch', mismatch_fields: ['email'] };
+  }
+  return { found: true, member_id: String(picked.member_id) };
+}
+
+async function findAventureBalmaMember(page, identity = {}) {
+  const last = String(identity.last_name || '').trim();
+  const first = String(identity.first_name || '').trim();
+  const missing = [];
+  if (!last) missing.push('last_name');
+  if (!first) missing.push('first_name');
+  if (!identity.birthdate) missing.push('birthdate');
+  if (missing.length) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: missing };
+  }
+
+  const ids = await listNameSearchMemberIds(page, last, first);
+  if (!ids.length) return { found: false, reason: 'not_found', mismatch_fields: [] };
+
+  const matches = [];
+  for (const memberId of ids.slice(0, 8)) {
+    await openMemberEditForm(page, memberId).catch(() => {});
+    let form = await readMemberIdentityFields(page).catch(() => null);
+    if (!form?.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
+      await page.waitForTimeout(400);
+      form = await readMemberIdentityFields(page).catch(() => null);
+    }
+    if (!form?.fromMemberForm) continue;
+    const { mismatchFields } = computeIdentityMismatches(form, identity, {
+      fields: CHANGE_MATCH_FIELDS,
+    });
+    if (!mismatchFields.length) {
+      matches.push({ member_id: String(memberId), email: form.email || '' });
+    }
+  }
+
+  logInfo('Aventure Balma — candidats nom/prénom/naissance', {
+    candidates: ids.length,
+    matches: matches.length,
+  });
+  return pickAventureBalmaMatch(matches, identity.email);
+}
+
 function normalizePerson(value) {
   return String(value || '')
     .normalize('NFD')
@@ -492,8 +598,8 @@ async function readMemberIdentityFields(page) {
 const DEFAULT_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate', 'phone'];
 /** Changement d’abo : nom + prénom + date de naissance uniquement. */
 const CHANGE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
-/** Aventure Balma : nom + prénom + naissance + email de la fiche. */
-const AVENTURE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate', 'email'];
+/** Aventure Balma : nom + prénom + naissance. Email seulement s’il y a plusieurs fiches. */
+const AVENTURE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
 
 /** Normalise une date Deciplus / ISO vers JJ/MM/AAAA comparable. */
 function normalizeBirthCompare(value) {
@@ -1793,6 +1899,8 @@ module.exports = {
   searchMember,
   searchMemberByName,
   findMemberByIdentity,
+  findAventureBalmaMember,
+  pickAventureBalmaMatch,
   computeIdentityMismatches,
   DEFAULT_MATCH_FIELDS,
   CHANGE_MATCH_FIELDS,
