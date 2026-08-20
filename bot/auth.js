@@ -620,7 +620,7 @@ async function performLogin(page, options = {}) {
   const hasStoredSession = fs.existsSync(STORAGE_FILE);
 
   if (!force && hasStoredSession && !envToken) {
-    await gotoDeciplus(page, 'nextgen/home');
+    await gotoDeciplus(page, 'nextgen/choose-zone?nextUrl=/home');
     // Toujours résoudre la salle AVANT le probe legacy (sinon select.php = faux « session morte »)
     if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
       logInfo('Session persistée — écran choix de salle');
@@ -637,7 +637,7 @@ async function performLogin(page, options = {}) {
       }
       if (!legacyOk) {
         // Soft recovery : home + zone avant wipe (évite un login OTP à chaque job)
-        await gotoDeciplus(page, 'nextgen/home');
+        await gotoDeciplus(page, 'nextgen/choose-zone?nextUrl=/home');
         await handleChooseZone(page, siteLabel);
         legacyOk = await isLegacySessionAlive(page);
       }
@@ -657,7 +657,7 @@ async function performLogin(page, options = {}) {
 
   if (!force && envToken) {
     await injectAuthToken(page, envToken);
-    await gotoDeciplus(page, 'nextgen/home');
+    await gotoDeciplus(page, 'nextgen/choose-zone?nextUrl=/home');
     const t = await getAccessToken(page);
     if (t && (await isAccessTokenValid(page, t)) && (await isLegacySessionAlive(page))) {
       logInfo('Connecté via DECIPLUS_AUTH_TOKEN');

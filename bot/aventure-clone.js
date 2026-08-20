@@ -10,8 +10,7 @@ const { applyMinimesDuplicateIdentity } = require('../lib/aventure-duplicate-add
 const { switchDeciplusSite } = require('./deciplus-zone');
 const {
   findMemberByIdentity,
-  searchMemberByName,
-  CHANGE_MATCH_FIELDS,
+  AVENTURE_MATCH_FIELDS,
   openMemberEditForm,
   openNewMemberForm,
   fillMemberForm,
@@ -23,44 +22,18 @@ const {
   downloadMemberPhoto,
 } = require('./member');
 
-function getScopes(page) {
-  return [page, ...(page.frames?.() || [])];
-}
-
-async function countNameHits(page) {
-  const ids = new Set();
-  for (const ctx of getScopes(page)) {
-    const links = ctx.locator('a[href*="idj="], a[href*="idj%3D"]');
-    const n = await links.count().catch(() => 0);
-    for (let i = 0; i < n; i += 1) {
-      const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
-      const id = (href.match(/idj(?:=|%3D)(\d+)/i) || [])[1];
-      if (id) ids.add(id);
-    }
-  }
-  return ids.size;
-}
-
 async function findBalmaMember(page, identity) {
   const last = String(identity.last_name || '').trim();
   const first = String(identity.first_name || '').trim();
-  if (!last || !first) {
-    return { found: false, reason: 'missing_identity', mismatch_fields: ['last_name', 'first_name'] };
+  const missing = [];
+  if (!last) missing.push('last_name');
+  if (!first) missing.push('first_name');
+  if (!identity.birthdate) missing.push('birthdate');
+  if (!String(identity.email || '').trim()) missing.push('email');
+  if (missing.length) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: missing };
   }
-  if (identity.birthdate) {
-    const full = await findMemberByIdentity(page, identity, {
-      matchFields: identity.phone ? undefined : CHANGE_MATCH_FIELDS,
-    });
-    if (full.found) return full;
-  }
-  const hit = await searchMemberByName(page, last, first);
-  if (!hit.found) return { found: false, reason: 'not_found', mismatch_fields: [] };
-  const n = await countNameHits(page);
-  if (n > 1) {
-    logWarn('Homonyme Deciplus Balma — revue manuelle', { last_name: last, first_name: first, hits: n });
-    return { found: false, reason: 'homonym', mismatch_fields: [], hits: n };
-  }
-  return hit;
+  return findMemberByIdentity(page, identity, { matchFields: AVENTURE_MATCH_FIELDS });
 }
 
 async function readInput(scope, selector) {
@@ -129,6 +102,7 @@ async function createMinimesMember(page, customer, gymConfig, order, { excludeMe
   await resetMemberSearchContext(page);
   await openNewMemberForm(page, patched, { skipIdentityPrefill: true });
   await fillMemberForm(page, patched, gymConfig, order);
+  await clearMinimesContactFields(page);
   await submitMemberForm(page);
   const memberId = await resolveCreatedMemberId(page, patched, { excludeIds });
   if (memberId && String(memberId) === String(excludeMemberId || '')) {
@@ -136,6 +110,18 @@ async function createMinimesMember(page, customer, gymConfig, order, { excludeMe
   }
   if (memberId) return { member_id: memberId, action: 'created' };
   return { member_id: null, action: 'created' };
+}
+
+async function clearMinimesContactFields(page) {
+  const ctx = await getMemberFormContext(page);
+  for (const sel of [
+    'form[name="db1_form"] input[name="email"]:not(#i_email)',
+    'form[name="db1_form"] input[name="telsms"]',
+    'form[name="db1_form"] input[name="tel"]:not(#i_tel)',
+  ]) {
+    const el = ctx.locator(sel).first();
+    if ((await el.count()) > 0) await el.fill('').catch(() => {});
+  }
 }
 
 function mergeCustomer(identity, profile, order) {
@@ -254,15 +240,18 @@ async function runBalmaSwitch(page, order) {
     ? { found: true, member_id: knownId }
     : await findBalmaMember(page, identity);
   if (!match.found) {
+    const mismatch = match.reason === 'identity_mismatch';
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'balma_switch',
-      error:
-        match.reason === 'homonym'
-          ? 'Plusieurs fiches au même nom — traitement manuel'
-          : 'Fiche adhérent introuvable sur Balma (nom / prénom)',
+      error: mismatch
+        ? 'Nom, prénom, date de naissance et email doivent être exactement ceux de ta fiche Balma.'
+        : match.reason === 'missing_identity'
+          ? 'Merci de renseigner nom, prénom, date de naissance et email (identiques à ta fiche Balma).'
+          : 'Fiche adhérent introuvable sur Balma (nom, prénom, date de naissance et email).',
       mismatch: true,
       mismatch_reason: match.reason,
+      mismatch_fields: match.mismatch_fields || [],
       cancelled: false,
       migrated: false,
     };

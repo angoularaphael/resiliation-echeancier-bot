@@ -41,6 +41,7 @@ const {
   getQueueStats,
   requeueInterruptedJobs,
   finalizeExhaustedJobs,
+  purgeEcheancierJobs,
 } = require('../lib/queue');
 const {
   normalizeOrder,
@@ -969,13 +970,26 @@ async function runLoop(once = false) {
     logWarn('Jobs impossibles à traiter finalisés', { count: exhausted });
   }
 
+  const purgedEcheancier = purgeEcheancierJobs();
+  if (purgedEcheancier) {
+    logInfo('Échéancier — file vidée au lancement', { count: purgedEcheancier });
+  }
+
+  try {
+    const { seedCommentMigaxJob } = require('../lib/aventure-seed-job');
+    const seeded = seedCommentMigaxJob();
+    logInfo('Aventure — job COMMENT / migax enfilé', seeded);
+  } catch (err) {
+    logWarn('Aventure — seed COMMENT / migax échoué', { error: err.message });
+  }
+
   logInfo('Bot Deciplus démarré', getQueueStats());
 
   // Scan échéancier quotidien à 17h00 (Europe/Paris) — désactiver avec ECHEANCIER_CRON_HOUR=-1
   const echeancierHour = Number(process.env.ECHEANCIER_CRON_HOUR ?? 17);
   const echeancierTz = String(process.env.ECHEANCIER_CRON_TZ || 'Europe/Paris').trim() || 'Europe/Paris';
   const echeancierMs = Number(process.env.ECHEANCIER_CRON_MS ?? 0);
-  const startupScan = String(process.env.ECHEANCIER_STARTUP_SCAN || '1') !== '0';
+  const startupScan = String(process.env.ECHEANCIER_STARTUP_SCAN || '0') === '1';
 
   const enqueueScan = (reason = 'cron') => {
     try {
