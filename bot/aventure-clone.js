@@ -94,6 +94,19 @@ async function readMemberIban(page, memberId) {
 async function createMinimesMember(page, customer, gymConfig, order, { excludeMemberId } = {}) {
   const excludeIds = [excludeMemberId].filter(Boolean);
   const patched = applyMinimesDuplicateIdentity(customer);
+  const existing = await findMemberByIdentity(page, patched, {
+    matchFields: ['last_name', 'first_name', 'birthdate'],
+  }).catch(() => ({ found: false }));
+  if (
+    existing.found &&
+    existing.member_id &&
+    String(existing.member_id) !== String(excludeMemberId || '')
+  ) {
+    logInfo('Fiche Minimes Aventure déjà présente — réutilisation', {
+      member_id: existing.member_id,
+    });
+    return { member_id: existing.member_id, action: 'reused' };
+  }
   logInfo('Création Minimes — prénom + Balma, sans mail ni téléphone', {
     from: customer.first_name,
     to: patched.first_name,
@@ -160,29 +173,60 @@ function shouldCreateChosenOfferSale(order = {}) {
 
 async function createChosenOfferSale(page, memberId, gymConfig, order) {
   const { recordSale } = require('./sale');
-  const { fetchDeciplusCatalog, resolveProductConfig } = require('./catalog');
+  const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
+  const { applyBillingPlanToProductConfig } = require('../lib/billing-plan');
   let catalog = [];
   try {
     catalog = await fetchDeciplusCatalog(page);
   } catch (err) {
     logWarn('Catalogue Deciplus indisponible pour vente Aventure', { error: err.message });
   }
-  const productConfig = resolveProductConfig(order, catalog || []);
-  const is259 = /saison|259|offre-saison|dp-100/i.test(
-    `${order.product_id || ''} ${order.offer || ''} ${order.product_name || ''}`
+  const productConfig = applyBillingPlanToProductConfig(
+    resolveProductConfig(order, catalog || []),
+    order
   );
+  const hint = `${order.product_id || ''} ${order.offer || ''} ${order.product_name || ''}`;
+  const is259 = /saison|259|offre-saison|dp-100/i.test(hint);
+  const is29 = /offre-duo|offre_29|dp-104|\b29\b/i.test(hint);
   if (is259) {
     productConfig.paiement_comptant = true;
     productConfig.requires_iban = false;
     productConfig.auto_badge = false;
   }
   productConfig.skip_rib_prompt = true;
+
+  let badgeProductConfig = null;
+  if (!is259 && productConfig.auto_badge) {
+    try {
+      const giftBadge =
+        String(order.source || '').toLowerCase() === 'balma_retour' && is29;
+      badgeProductConfig = resolveBadgeProductConfig(
+        catalog || [],
+        giftBadge
+          ? {
+              badge_timing: 'immediate',
+              badge_method: 'comptant',
+              paiement_comptant: true,
+              prelevement_delay_days: 0,
+            }
+          : {
+              badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
+              badge_method: order.badge_method || order.payment?.badge_method || 'iban',
+            }
+      );
+    } catch (err) {
+      logWarn('Badge Aventure non ajouté', { error: err.message });
+    }
+  }
+
   logInfo('Vente Aventure sur fiche Minimes', {
     member_id: memberId,
     product: order.product_id || order.offer,
+    badge: Boolean(badgeProductConfig),
+    badge_offert: is29 && String(order.source || '').toLowerCase() === 'balma_retour',
   });
   return recordSale(page, order, productConfig, memberId, gymConfig, {
-    badgeProductConfig: null,
+    badgeProductConfig,
   });
 }
 

@@ -259,7 +259,6 @@ function resolveBadgeProductConfig(catalog, overrides = {}) {
   }
 
   const defaults = loadJson('config/sale-defaults.json').carte;
-  // Toujours différé ~72h / IBAN — plus de choix immédiat / carte
   const delayDays = Number(
     overrides.prelevement_delay_days || defaults.prelevement_delay_days || 3
   );
@@ -273,10 +272,13 @@ function resolveBadgeProductConfig(catalog, overrides = {}) {
     amount: Number(matched.price) || 34.99,
     ...defaults,
     sale_type: 'carte',
-    paiement_comptant: false,
-    badge_timing: 'deferred',
-    badge_method: 'iban',
-    prelevement_delay_days: delayDays,
+    paiement_comptant: overrides.paiement_comptant === true,
+    badge_timing: overrides.badge_timing || 'deferred',
+    badge_method: overrides.badge_method || 'iban',
+    prelevement_delay_days:
+      overrides.paiement_comptant === true || overrides.badge_timing === 'immediate'
+        ? 0
+        : delayDays,
     requires_iban: false,
     skip_rib_prompt: true,
     auto_badge: false,
