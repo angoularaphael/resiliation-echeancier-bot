@@ -976,11 +976,11 @@ async function runLoop(once = false) {
   }
 
   try {
-    const { seedCommentMigaxJob } = require('../lib/aventure-seed-job');
-    const seeded = seedCommentMigaxJob();
-    logInfo('Aventure — job COMMENT / migax enfilé', seeded);
+    const { dropCommentSeedJobs } = require('../lib/aventure-seed-job');
+    const dropped = dropCommentSeedJobs();
+    if (dropped) logInfo('Aventure — job COMMENT / migax retiré de la file', { count: dropped });
   } catch (err) {
-    logWarn('Aventure — seed COMMENT / migax échoué', { error: err.message });
+    logWarn('Aventure — retrait job COMMENT / migax échoué', { error: err.message });
   }
 
   logInfo('Bot Deciplus démarré', getQueueStats());
