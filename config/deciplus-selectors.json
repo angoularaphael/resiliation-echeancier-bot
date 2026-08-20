@@ -14,6 +14,7 @@
     "prenom": "#i_prenom, input[name=\"prenom\"]",
     "email": "#i_email, input[name=\"email\"]",
     "tel": "#i_tel, input[name=\"tel\"]",
+    "code": "#i_code, input[name=\"code\"]",
     "new_button": "#buttonNew, input#buttonNew"
   },
   "member_form_selectors": {

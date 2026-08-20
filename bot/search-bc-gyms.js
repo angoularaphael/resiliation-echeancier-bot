@@ -21,10 +21,14 @@ async function memberZoneLooksBalma(page) {
 }
 
 /**
- * Identité résil / changement d’abo : 5 salles Boxing Center, jamais Balma.
+ * Identité résil / changement d’abo : 5 salles Boxing Center.
+ * Balma seulement si includeBalma (fiche vraiment sur Balma).
  */
 async function findMemberOnBoxingCenterGyms(page, identity, options = {}) {
   const slugs = boxingCenterGymsExceptBalma(options.preferredGym);
+  if (options.includeBalma && !slugs.includes('balma')) {
+    slugs.unshift('balma');
+  }
   let last = { found: false, reason: 'not_found', mismatch_fields: [] };
   for (const slug of slugs) {
     const gym = getGymConfig(slug);
@@ -39,7 +43,7 @@ async function findMemberOnBoxingCenterGyms(page, identity, options = {}) {
       last = match;
       continue;
     }
-    if (await memberZoneLooksBalma(page)) {
+    if (!options.includeBalma && (await memberZoneLooksBalma(page))) {
       logInfo('Fiche Balma ignorée (résil / changement)', { member_id: match.member_id, gym: slug });
       last = { found: false, reason: 'balma_skipped', member_id: match.member_id };
       continue;

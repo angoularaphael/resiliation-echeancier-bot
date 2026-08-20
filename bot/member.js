@@ -7,6 +7,7 @@ const {
   expandDeciplusUrl,
   extractMemberIdFromUrl,
   isNewMemberUrl,
+  nameForDeciplusSearch,
 } = require('../lib/deciplus-member-format');
 
 function navTimeout() {
@@ -372,16 +373,18 @@ async function searchMember(page, query) {
 }
 
 async function searchMemberByName(page, lastName, firstName) {
-  if (!lastName && !firstName) return { found: false };
-  logInfo('Recherche membre Deciplus', { via: 'name', last_name: lastName || null });
+  const last = nameForDeciplusSearch(lastName);
+  const first = nameForDeciplusSearch(firstName);
+  if (!last && !first) return { found: false };
+  logInfo('Recherche membre Deciplus', { via: 'name', last_name: last, first_name: first || null });
 
   const sel = getSelectors();
   await navigateToMembers(page);
   await clearMemberSearchFields(page);
   const ctx = await getMemberSearchContext(page);
 
-  if (lastName) await fillFirst(ctx, sel.quick_search_selectors?.nom || '#i_nom', lastName);
-  if (firstName) await fillFirst(ctx, sel.quick_search_selectors?.prenom || '#i_prenom', firstName);
+  if (last) await fillFirst(ctx, sel.quick_search_selectors?.nom || '#i_nom', last);
+  if (first) await fillFirst(ctx, sel.quick_search_selectors?.prenom || '#i_prenom', first);
 
   await submitMemberSearch(page);
 
@@ -768,8 +771,8 @@ async function openNewMemberFormViaSelect(page, customer, { skipIdentityPrefill 
   // select.php est dans iframe nextgen (_vue_iframe) — #buttonNew n’est PAS sur page
   const searchCtx = await getMemberSearchContext(page, { waitMs: 12000 });
   if (!skipIdentityPrefill) {
-    await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
-    await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
+    await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', nameForDeciplusSearch(customer.last_name));
+    await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', nameForDeciplusSearch(customer.first_name));
     if (customer.email) {
       await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
     }
@@ -825,8 +828,8 @@ async function openNewMemberFormViaUrl(page, customer, { skipIdentityPrefill = f
     returntoselect: '',
   });
   if (!skipIdentityPrefill) {
-    params.set('jnom', customer.last_name || '');
-    params.set('jprenom', customer.first_name || '');
+    params.set('jnom', nameForDeciplusSearch(customer.last_name));
+    params.set('jprenom', nameForDeciplusSearch(customer.first_name));
     if (customer.email) params.set('jemail', customer.email);
   }
   const qs = params.toString();

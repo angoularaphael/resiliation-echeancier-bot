@@ -301,7 +301,8 @@ async function processCancelJob(page, order) {
         : undefined;
     const match = await findMemberOnBoxingCenterGyms(page, identity, {
       matchFields,
-      preferredGym: isBalmaGymSlug(order.gym) ? 'minimes' : order.gym,
+      preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
+      includeBalma: isBalmaGymSlug(order.gym),
     });
     if (!match.found) {
       await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
@@ -768,7 +769,8 @@ async function processVerifyIdentityJob(page, order) {
   const { isBalmaGymSlug } = require('../lib/gym-slugs');
   const match = await findMemberOnBoxingCenterGyms(page, identity, {
     matchFields,
-    preferredGym: isBalmaGymSlug(order.gym) ? 'minimes' : order.gym,
+    preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
+    includeBalma: isBalmaGymSlug(order.gym),
   });
   if (!match.found) {
     await pushStatus('mismatch', {
