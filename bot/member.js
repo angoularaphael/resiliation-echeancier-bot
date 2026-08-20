@@ -666,33 +666,41 @@ async function clickFirstMemberResult(page) {
 
 async function extractMemberId(page) {
   return (
-    extractMemberIdFromUrl(page.url()) ||
+    (await extractMemberIdFromAnyContext(page)) ||
     (await extractMemberIdFromForm(page)) ||
     null
   );
 }
 
-async function resolveCreatedMemberId(page, customer) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const id = await extractMemberId(page);
+async function resolveCreatedMemberId(page, customer, { excludeIds = [] } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const accept = (id) => (id && !skip.has(String(id)) ? String(id) : null);
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const id = accept(await extractMemberId(page));
     if (id) return id;
-    // Parfois Deciplus redirige via check.php?idjnew= puis select.php
-    const urlId = extractMemberIdFromUrl(page.url());
+    const urlId = accept(extractMemberIdFromUrl(page.url()));
     if (urlId) return urlId;
     await page.waitForTimeout(700);
   }
 
-  if (customer?.email) {
-    const byEmail = await searchMember(page, customer.email);
-    if (byEmail.found) return byEmail.member_id;
-  }
-  if (customer?.phone) {
-    const byPhone = await searchMember(page, customer.phone);
-    if (byPhone.found) return byPhone.member_id;
-  }
-  if (customer?.last_name || customer?.first_name) {
-    const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
-    if (byName.found) return byName.member_id;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (customer?.email) {
+      const byEmail = await searchMember(page, customer.email);
+      const id = accept(byEmail.member_id);
+      if (id) return id;
+    }
+    if (customer?.phone) {
+      const byPhone = await searchMember(page, customer.phone);
+      const id = accept(byPhone.member_id);
+      if (id) return id;
+    }
+    if (customer?.last_name || customer?.first_name) {
+      const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
+      const id = accept(byName.member_id);
+      if (id) return id;
+    }
+    await page.waitForTimeout(1200);
   }
   return null;
 }
@@ -718,15 +726,17 @@ async function detectFormValidationError(page) {
   return null;
 }
 
-async function openNewMemberFormViaSelect(page, customer) {
+async function openNewMemberFormViaSelect(page, customer, { skipIdentityPrefill = false } = {}) {
   const sel = getSelectors();
   await navigateToMembers(page);
   // select.php est dans iframe nextgen (_vue_iframe) — #buttonNew n’est PAS sur page
   const searchCtx = await getMemberSearchContext(page, { waitMs: 12000 });
-  await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
-  await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
-  if (customer.email) {
-    await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
+  if (!skipIdentityPrefill) {
+    await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
+    await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
+    if (customer.email) {
+      await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
+    }
   }
 
   assertMemberSessionAlive(page, 'avant #buttonNew');
@@ -772,15 +782,17 @@ async function openNewMemberFormViaSelect(page, customer) {
   return null;
 }
 
-async function openNewMemberFormViaUrl(page, customer) {
+async function openNewMemberFormViaUrl(page, customer, { skipIdentityPrefill = false } = {}) {
   const params = new URLSearchParams({
     idj: 'new',
     idn: '',
     returntoselect: '',
-    jnom: customer.last_name || '',
-    jprenom: customer.first_name || '',
   });
-  if (customer.email) params.set('jemail', customer.email);
+  if (!skipIdentityPrefill) {
+    params.set('jnom', customer.last_name || '');
+    params.set('jprenom', customer.first_name || '');
+    if (customer.email) params.set('jemail', customer.email);
+  }
   const qs = params.toString();
   const origin = new URL(page.url()).origin;
   // Même stratégie que openMemberEditForm : nextgen/legacy d’abord
@@ -822,25 +834,26 @@ async function openNewMemberFormViaUrl(page, customer) {
   return null;
 }
 
-async function openNewMemberForm(page, customer) {
+async function openNewMemberForm(page, customer, options = {}) {
   logInfo('Ouverture formulaire nouveau membre Deciplus', {
     last_name: customer.last_name,
     email: customer.email || null,
+    skip_identity_prefill: Boolean(options.skipIdentityPrefill),
   });
 
-  let ctx = await openNewMemberFormViaSelect(page, customer);
+  let ctx = await openNewMemberFormViaSelect(page, customer, options);
   if (ctx) return ctx;
 
   logInfo('Repli création membre — URL nextgen/legacy joueurs.php');
   try {
-    ctx = await openNewMemberFormViaUrl(page, customer);
+    ctx = await openNewMemberFormViaUrl(page, customer, options);
     if (ctx) return ctx;
   } catch (err) {
     if (/Session Deciplus expirée/i.test(err.message)) throw err;
     logWarn('URL joueurs.php en échec', { error: err.message });
   }
 
-  ctx = await openNewMemberFormViaSelect(page, customer);
+  ctx = await openNewMemberFormViaSelect(page, customer, options);
   if (ctx) return ctx;
 
   if (isSessionExpiredUrl(page.url())) {
@@ -880,6 +893,8 @@ async function fillMemberForm(page, customer, gymConfig, order) {
   await fillFirst(ctx, sel.telsms || 'input[name="telsms"]', phone);
   await fillFirst(ctx, sel.tel || 'input[name="tel"]', phone);
   await fillFirst(ctx, sel.adr1 || 'input[name="adr1"]', customer.address);
+  const adr2 = customer.address2 || customer.adr2;
+  if (adr2) await fillFirst(ctx, sel.adr2 || 'input[name="adr2"]', adr2);
   await fillFirst(ctx, sel.codepostal || 'input[name="codepostal"]', customer.postal_code);
   await fillFirst(ctx, sel.ville || 'input[name="ville"]', customer.city);
   await fillFirst(
@@ -1036,7 +1051,162 @@ async function clickValidateButton(ctx, selectors, opts = {}) {
   return false;
 }
 
-async function submitMemberForm(page) {
+const CREER_QUAND_MEME_RE = /cr[eé]er\s+quand\s+m[eê]me/i;
+
+function deciplusScopes(page) {
+  try {
+    return [page, ...(page.frames?.() || [])];
+  } catch {
+    return [page];
+  }
+}
+
+async function duplicateDialogVisible(page) {
+  for (const ctx of deciplusScopes(page)) {
+    const visible = await ctx
+      .evaluate(() => {
+        const widget =
+          document.querySelector('.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"]') ||
+          document.getElementById('emailOrTelAlreadyExistDialog')?.closest('.ui-dialog');
+        if (!widget) return false;
+        const s = window.getComputedStyle(widget);
+        const r = widget.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 10 && r.height > 10;
+      })
+      .catch(() => false);
+    if (visible) return true;
+  }
+  return false;
+}
+
+async function waitForMemberId(page, timeoutMs = 15000, { excludeIds = [] } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const deadline = Date.now() + Math.max(500, timeoutMs);
+  while (Date.now() < deadline) {
+    const id = await extractMemberId(page);
+    if (id && !skip.has(String(id))) return id;
+    await page.waitForTimeout(300);
+  }
+  return null;
+}
+
+async function clickCreerQuandMemeInContext(ctx) {
+  const result = await ctx
+    .evaluate(() => {
+      const re = /cr[eé]er\s+quand\s+m[eê]me/i;
+      const content = document.getElementById('emailOrTelAlreadyExistDialog');
+      const widget =
+        document.querySelector('.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"]') ||
+        content?.closest('.ui-dialog');
+      if (widget) {
+        const s = window.getComputedStyle(widget);
+        const r = widget.getBoundingClientRect();
+        if (s.display === 'none' || s.visibility === 'hidden' || r.width < 10) {
+          return { ok: false, how: 'hidden' };
+        }
+      } else if (!content) {
+        return { ok: false, how: 'missing' };
+      }
+
+      const $ = window.jQuery;
+      if ($ && content && $.fn && $.fn.dialog) {
+        try {
+          const $dlg = $(content);
+          const btns = $dlg.dialog('option', 'buttons');
+          const run = (fn) => {
+            fn.call(content);
+            return { ok: true, how: 'jquery-dialog' };
+          };
+          if (Array.isArray(btns)) {
+            const b = btns.find((x) => re.test(String(x.text || x.label || '')));
+            if (b && typeof b.click === 'function') return run(b.click);
+          } else if (btns && typeof btns === 'object') {
+            const key = Object.keys(btns).find((k) => re.test(k));
+            if (key && typeof btns[key] === 'function') return run(btns[key]);
+          }
+        } catch {
+          /* dialog non initialisé */
+        }
+      }
+
+      const btn =
+        (widget || document).querySelector(
+          '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button.ui-button.ui-corner-all.ui-widget, .ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button.ui-button'
+        ) ||
+        (widget || document).querySelector(
+          '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button, .ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-button'
+        ) ||
+        Array.from(
+          (widget || document).querySelectorAll('.ui-dialog-buttonset button, .ui-dialog-buttonpane button')
+        ).find((node) => re.test(`${node.innerText || ''} ${node.value || ''}`));
+      if (!btn) return { ok: false, how: 'no-btn' };
+      if ($) $(btn).click();
+      else btn.click();
+      return { ok: true, how: 'dom-click' };
+    })
+    .catch(() => ({ ok: false, how: 'eval' }));
+
+  if (result?.ok) return result.how || true;
+
+  const widget = ctx.locator(
+    '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"], .ui-dialog:has(#emailOrTelAlreadyExistDialog)'
+  );
+  if ((await widget.count().catch(() => 0)) === 0) return false;
+  if (!(await widget.first().isVisible().catch(() => false))) return false;
+  const btn = widget
+    .locator(
+      '.ui-dialog-buttonset button.ui-button.ui-corner-all.ui-widget, .ui-dialog-buttonset button.ui-button, .ui-dialog-buttonset button'
+    )
+    .filter({ hasText: CREER_QUAND_MEME_RE })
+    .first();
+  if ((await btn.count().catch(() => 0)) === 0) return false;
+  await btn.click({ timeout: 4000 }).catch(async () => {
+    await btn.click({ force: true, timeout: 3000 });
+  });
+  return 'locator';
+}
+
+/** Dialogue Deciplus `#emailOrTelAlreadyExistDialog` → callback jQuery « Créer quand même ». */
+async function clickCreerQuandMeme(page, { timeoutMs = 10000 } = {}) {
+  const deadline = Date.now() + Math.max(500, timeoutMs);
+  const formCtx = await getMemberFormContext(page, { waitMs: 800 }).catch(() => page);
+  while (Date.now() < deadline) {
+    const scopes = [formCtx, ...deciplusScopes(page)];
+    const seen = new Set();
+    for (const ctx of scopes) {
+      const key = ctx === page ? 'page' : ctx.url?.() || String(ctx);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const how = await clickCreerQuandMemeInContext(ctx).catch(() => false);
+      if (!how) continue;
+      logInfo('Doublon Deciplus — clic « Créer quand même »', { how });
+      await randomDelay(600, 1100);
+      if (!(await duplicateDialogVisible(page))) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  if (!(await duplicateDialogVisible(page))) return true;
+  logWarn('Bouton « Créer quand même » introuvable');
+  return false;
+}
+
+const HARD_DUPLICATE_PAGE_RE =
+  /CR[EÉ]ATION\s+D['’']UN\s+DOUBLON|n['’']a\s+pas\s+[eé]t[eé]\s+enregistr[eé]e|op[eé]ration\s+annul[eé]e/i;
+
+/** Page serveur Deciplus (pas le dialog email/tel) — aucun bouton « forcer ». */
+async function detectHardDuplicatePage(page) {
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    const text = ((await ctx.locator('body').innerText().catch(() => '')) || '').slice(0, 5000);
+    if (!HARD_DUPLICATE_PAGE_RE.test(text)) continue;
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 280);
+    logWarn('Page Deciplus CRÉATION D\'UN DOUBLON (blocage serveur)', { snippet });
+    return snippet;
+  }
+  return null;
+}
+
+async function submitMemberForm(page, options = {}) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
   const isNew = await isNewMemberForm(page, ctx);
@@ -1106,29 +1276,53 @@ async function submitMemberForm(page) {
     }
   }
 
-  await navPromise;
-  await page
-    .waitForURL(
-      /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|select\.php|legacy\?path=/i,
-      { timeout: 20000 }
-    )
-    .catch(() => {});
-  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-  await randomDelay(800, 1500);
-  await dismissJqueryUiOverlay(page);
-
-  // Dialogue confirmation éventuel après Valider
-  const confirmBtn = page
-    .locator(
-      '.ui-dialog-buttonpane button:has-text("OK"), .ui-dialog-buttonpane button:has-text("Valider"), .ui-dialog-buttonpane button:has-text("Oui")'
-    )
-    .first();
-  if ((await confirmBtn.count()) > 0 && (await confirmBtn.isVisible().catch(() => false))) {
-    await confirmBtn.click().catch(() => {});
+  if (options.allowDuplicate) {
+    const excludeIds = options.excludeIds || [];
+    await clickCreerQuandMeme(page, { timeoutMs: 25000 });
+    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    await page
+      .waitForURL(/idjnew=\d+|check\.php|joueurs\.php\?[^#]*idj=\d+/i, { timeout: 12000 })
+      .catch(() => {});
+    const hard = await detectHardDuplicatePage(page);
+    if (hard) {
+      throw new Error(`Deciplus a bloqué le doublon (identité + adresse identiques) : ${hard}`);
+    }
+    let memberId = await waitForMemberId(page, 15000, { excludeIds });
+    if (!memberId && (await duplicateDialogVisible(page))) {
+      await clickCreerQuandMeme(page, { timeoutMs: 8000 });
+      await page.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
+      const hard2 = await detectHardDuplicatePage(page);
+      if (hard2) {
+        throw new Error(`Deciplus a bloqué le doublon (identité + adresse identiques) : ${hard2}`);
+      }
+      memberId = await waitForMemberId(page, 10000, { excludeIds });
+    }
+    if (!memberId) {
+      logWarn('Après « Créer quand même », ID membre encore introuvable — pas de 2e Valider');
+    }
+  } else {
+    await navPromise;
+    await page
+      .waitForURL(
+        /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|select\.php|legacy\?path=/i,
+        { timeout: 20000 }
+      )
+      .catch(() => {});
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-    await randomDelay(500, 900);
-  await dismissJqueryUiOverlay(page);
-}
+    await randomDelay(800, 1500);
+    await dismissJqueryUiOverlay(page);
+    const confirmBtn = page
+      .locator(
+        '.ui-dialog-buttonpane button:has-text("OK"), .ui-dialog-buttonpane button:has-text("Valider"), .ui-dialog-buttonpane button:has-text("Oui")'
+      )
+      .first();
+    if ((await confirmBtn.count()) > 0 && (await confirmBtn.isVisible().catch(() => false))) {
+      await confirmBtn.click().catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await randomDelay(500, 900);
+      await dismissJqueryUiOverlay(page);
+    }
+  }
 
   const afterUrl = page.url();
   logInfo('Après soumission membre', { url: afterUrl, member_id: extractMemberIdFromUrl(afterUrl) });
@@ -1486,8 +1680,11 @@ module.exports = {
   openNewMemberForm,
   fillMemberForm,
   submitMemberForm,
+  clickCreerQuandMeme,
+  detectHardDuplicatePage,
   findOrCreateMember,
   extractMemberId,
+  resolveCreatedMemberId,
   extractMemberIdFromUrl,
   expandDeciplusUrl,
   detectDuplicateError,

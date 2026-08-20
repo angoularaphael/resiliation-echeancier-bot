@@ -318,11 +318,33 @@ async function ensureDeciplusSaleZone(page, gymConfig = {}) {
   return true;
 }
 
+async function switchDeciplusSite(page, siteLabel) {
+  const label = String(siteLabel || '').trim();
+  if (!label) return false;
+  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
+  await page
+    .goto(new URL('nextgen/choose-zone?nextUrl=/home&forced=true', base).href, {
+      waitUntil: 'domcontentloaded',
+      timeout: Number(process.env.DECIPLUS_NAV_TIMEOUT || 60000),
+    })
+    .catch(() => {});
+  await randomDelay(400, 800);
+  const selected = await selectSiteInPicker(page, label);
+  if (!selected) {
+    logWarn('Changement de site Deciplus impossible', { site: label, url: page.url() });
+    return false;
+  }
+  await clickSellOnSite(page).catch(() => {});
+  logInfo('Site Deciplus actif', { site: label });
+  return true;
+}
+
 module.exports = {
   isChooseZoneScreen,
   selectSiteInPicker,
   clickSellOnSite,
   ensureDeciplusSaleZone,
+  switchDeciplusSite,
   normalizeSiteLabel,
   siteLabelsMatch,
 };
