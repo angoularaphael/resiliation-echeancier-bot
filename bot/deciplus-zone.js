@@ -1,6 +1,7 @@
 const { randomDelay } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { dismissDeciplusModals, dismissJqueryUiOverlay } = require('./ui');
+const { assertNotBalmaSale } = require('../lib/gym-slugs');
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -289,6 +290,7 @@ async function clickSellOnSite(page) {
  * Doit TOUJOURS aboutir à /vente si l'écran zone est présent — sinon le catalogue produit n'apparaît pas.
  */
 async function ensureDeciplusSaleZone(page, gymConfig = {}) {
+  assertNotBalmaSale(gymConfig, {});
   if (!(await isChooseZoneScreen(page))) return false;
 
   const siteLabel =

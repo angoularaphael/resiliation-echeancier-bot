@@ -393,6 +393,13 @@ async function processSaleJob(page, order, jobMeta = {}) {
     };
   }
   const gymConfig = getGymConfig(order.gym);
+  const { isBalmaSaleTarget, BALMA_SALE_ERROR } = require('../lib/gym-slugs');
+  if (isBalmaSaleTarget(gymConfig, order)) {
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      error: BALMA_SALE_ERROR,
+    };
+  }
 
   let badgeProductConfig = null;
   if (productConfig.auto_badge) {
