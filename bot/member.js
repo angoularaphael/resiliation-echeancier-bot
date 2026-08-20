@@ -672,32 +672,68 @@ async function extractMemberId(page) {
   );
 }
 
+async function collectMemberIdsFromPage(page, { links = true } = {}) {
+  const ids = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const id = String(raw || '');
+    if (!/^\d+$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  add(extractMemberIdFromUrl(page.url()));
+  for (const frame of page.frames()) {
+    try {
+      add(extractMemberIdFromUrl(frame.url()));
+    } catch {
+      /* frame détachée */
+    }
+    if (!links) continue;
+    const loc = frame.locator('a[href*="idj="], a[href*="idj%3D"]');
+    const n = await loc.count().catch(() => 0);
+    for (let i = 0; i < n; i += 1) {
+      const href = (await loc.nth(i).getAttribute('href').catch(() => '')) || '';
+      add((href.match(/idj(?:=|%3D)(\d+)/i) || [])[1]);
+    }
+  }
+  return ids;
+}
+
+async function pickCreatedMemberId(page, excludeIds = [], { links = true } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const ids = await collectMemberIdsFromPage(page, { links });
+  return ids.find((id) => !skip.has(id)) || null;
+}
+
 async function resolveCreatedMemberId(page, customer, { excludeIds = [] } = {}) {
   const skip = new Set((excludeIds || []).map(String).filter(Boolean));
   const accept = (id) => (id && !skip.has(String(id)) ? String(id) : null);
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const id = accept(await extractMemberId(page));
+    const id = accept(await pickCreatedMemberId(page, excludeIds, { links: false }));
     if (id) return id;
-    const urlId = accept(extractMemberIdFromUrl(page.url()));
-    if (urlId) return urlId;
     await page.waitForTimeout(700);
   }
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (customer?.email) {
-      const byEmail = await searchMember(page, customer.email);
-      const id = accept(byEmail.member_id);
+      await searchMember(page, customer.email);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
       if (id) return id;
     }
     if (customer?.phone) {
-      const byPhone = await searchMember(page, customer.phone);
-      const id = accept(byPhone.member_id);
+      await searchMember(page, customer.phone);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
       if (id) return id;
     }
     if (customer?.last_name || customer?.first_name) {
-      const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
-      const id = accept(byName.member_id);
+      await searchMemberByName(page, customer.last_name, customer.first_name);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
+      if (id) return id;
+    }
+    if (customer?.last_name) {
+      await searchMemberByName(page, customer.last_name, '');
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
       if (id) return id;
     }
     await page.waitForTimeout(1200);
@@ -885,9 +921,9 @@ async function fillMemberForm(page, customer, gymConfig, order) {
     gym: gymConfig.key || gymConfig.deciplus_label || null,
   });
 
-  await fillFirst(ctx, sel.nom || 'input[name="nom"]', lastName);
-  await fillFirst(ctx, sel.prenom || 'input[name="prenom"]', firstName);
-  await fillFirst(ctx, sel.email || 'input[name="email"]', customer.email);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="nom"]:not(#i_nom)', lastName);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="prenom"]:not(#i_prenom)', firstName);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="email"]:not(#i_email)', customer.email);
   await fillFirst(ctx, sel.date_naissance || 'input[name="date_naissance"]', formatBirthdate(customer.birthdate));
   await fillFirst(ctx, sel.sexe || 'select[name="sexe"]', genderToDeciplus(customer.gender));
   await fillFirst(ctx, sel.telsms || 'input[name="telsms"]', phone);
@@ -902,6 +938,20 @@ async function fillMemberForm(page, customer, gymConfig, order) {
     sel.pays || 'input[name="pays"], select[name="pays"]',
     countryLabelForDeciplus(customer.country)
   );
+
+  const writtenFirst = await ctx
+    .locator('form[name="db1_form"] input[name="prenom"]:not(#i_prenom)')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  if (String(writtenFirst || '').trim() !== String(firstName).trim()) {
+    await ctx
+      .locator('form[name="db1_form"] input[name="prenom"]:not(#i_prenom)')
+      .first()
+      .fill(String(firstName))
+      .catch(() => {});
+  }
+  logInfo('Prénom fiche membre', { expected: firstName, written: writtenFirst });
 
   if (order.utm?.source) await fillFirst(ctx, sel.utm_source || 'input[name="utm_source"]', order.utm.source);
   if (order.utm?.medium) await fillFirst(ctx, sel.utm_medium || 'input[name="utm_medium"]', order.utm.medium);
@@ -1666,6 +1716,59 @@ async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId =
   }
 }
 
+async function downloadMemberPhoto(page, memberId) {
+  if (!memberId) return null;
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const minBytes = 5000;
+  const token = await getStaffAccessToken(page);
+  const origin = new URL(process.env.DECIPLUS_URL || page.url() || 'https://boxingcenter.deciplus.pro/').origin;
+  const isReal = (buf) => {
+    if (!buf || buf.length < minBytes) return false;
+    const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
+    const png = buf[0] === 0x89 && buf[1] === 0x50;
+    return jpeg || png;
+  };
+  const fetchBuf = async (url, headers = { Accept: 'image/*,*/*' }) => {
+    const res = await page.context().request.get(url, { headers, timeout: 12000 });
+    if (!res.ok()) return null;
+    return Buffer.from(await res.body());
+  };
+  const candidates = [
+    { url: `${origin}/photomembre.php?idj=${encodeURIComponent(memberId)}`, headers: { Accept: 'image/*,*/*' } },
+    { url: `${origin}/get_photo.php?idj=${encodeURIComponent(memberId)}`, headers: { Accept: 'image/*,*/*' } },
+    {
+      url: `https://api.deciplus.pro/staff/v1/member/${memberId}/photo`,
+      headers: token
+        ? { 'x-access-token': token, 'Deciplus-Client-Type': 'manager', Accept: '*/*' }
+        : { Accept: '*/*' },
+    },
+  ];
+  let buf = null;
+  for (const c of candidates) {
+    try {
+      const raw = await fetchBuf(c.url, c.headers);
+      if (isReal(raw)) {
+        buf = raw;
+        break;
+      }
+    } catch {
+      /* essayer l’URL suivante */
+    }
+  }
+  if (!buf) return null;
+  const ext = buf[0] === 0x89 ? '.png' : '.jpg';
+  const dest = path.join(os.tmpdir(), `bc-balma-photo-${memberId}-${Date.now()}${ext}`);
+  fs.writeFileSync(dest, buf);
+  const mime = ext === '.png' ? 'image/png' : 'image/jpeg';
+  return {
+    path: dest,
+    cleanup: true,
+    dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+  };
+}
+
 module.exports = {
   navigateToMembers,
   searchMember,
@@ -1691,5 +1794,6 @@ module.exports = {
   phoneForDeciplus,
   resetMemberSearchContext,
   uploadMemberPhoto,
+  downloadMemberPhoto,
   resolvePhotoFile,
 };

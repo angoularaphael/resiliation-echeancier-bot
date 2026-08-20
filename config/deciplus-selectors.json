@@ -18,7 +18,7 @@
   },
   "member_form_selectors": {
     "nom": "input[name=\"nom\"]",
-    "prenom": "input[name=\"prenom\"]",
+    "prenom": "form[name=\"db1_form\"] input[name=\"prenom\"]:not(#i_prenom)",
     "email": "input[name=\"email\"]",
     "date_naissance": "input[name=\"date_naissance\"]",
     "sexe": "select[name=\"sexe\"]",
