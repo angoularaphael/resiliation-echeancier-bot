@@ -9,6 +9,7 @@ const { gotoDeciplus } = require('./auth');
 const {
   classifyUnpaid,
   shouldCancel,
+  isTwoConsecutiveUnpaid,
   shouldSendReminder,
   shouldCountAttempt,
   isRelanceRun,
@@ -620,14 +621,25 @@ async function runEcheancierScan(
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
   const candidates = await collectUnpaidAcrossMonths(page);
-  const work = candidates.slice(0, max);
+  const twoUnpaid = candidates.filter((c) => isTwoConsecutiveUnpaid(classifyUnpaid(c)));
+  const workIds = new Set();
+  const work = [];
+  for (const c of twoUnpaid.concat(candidates)) {
+    const id = String(c.member_id || c.name || '');
+    if (!id || workIds.has(id)) continue;
+    if (work.length >= Math.max(max, twoUnpaid.length)) break;
+    workIds.add(id);
+    work.push(c);
+  }
   logInfo('Échéancier — impayés détectés', {
     count: candidates.length,
+    two_unpaid: twoUnpaid.length,
     will_process: work.length,
-    sample: work.slice(0, 8).map((c) => ({
+    sample: twoUnpaid.slice(0, 8).map((c) => ({
       id: c.member_id,
       unpaid: c.unpaid_count,
       months: c.months,
+      name: c.name,
     })),
   });
 
@@ -758,7 +770,7 @@ async function runEcheancierScan(
   }
   saveState(state);
 
-  logInfo('Échéancier — phase RÉSILIATION (10e tentative)');
+  logInfo('Échéancier — phase RÉSILIATION (2 impayés d’affilée, ou 10e relance)');
   for (let i = 0; i < work.length; i += 1) {
     if (cancelled >= maxCancel) break;
     const cand = work[i];
@@ -774,7 +786,7 @@ async function runEcheancierScan(
     if (!due) {
       row.skipped = true;
       const attempts = Number(mem.attempt_count || 0);
-      row.reason = attempts > 0 ? `attente_tentative_${attempts}/10` : 'pas_encore_10e';
+      row.reason = attempts > 0 ? `attente_tentative_${attempts}/10` : 'un_seul_impaye';
       if (attempts > 0 && attempts < 10) waitingAttempts += 1;
       continue;
     }
@@ -799,11 +811,15 @@ async function runEcheancierScan(
     try {
       logInfo(`Échéancier — résiliation ${cancelled + 1}/${maxCancel}`, {
         member_id: cand.member_id,
+        name: cand.name || null,
+        unpaid: cand.unpaid_count,
+        months: cand.months,
         contracts: row.eligible,
       });
       const cancel = await cancelSale(page, cand.member_id, {
         cancelReason: 'echeancier_impayes',
         cancelDate: new Date(),
+        filter: (c) => c && !c.isBadge && isEligibleContractLabel(c.label),
       });
       row.cancelled_count = cancel.cancelled_count;
       row.skip_reason = cancel.skip_reason || null;
@@ -846,6 +862,7 @@ async function runEcheancierScan(
   return {
     ok: true,
     candidates: candidates.length,
+    two_unpaid: twoUnpaid.length,
     dry_run: isDry,
     cancelled,
     mailed_reminder: mailedReminder,

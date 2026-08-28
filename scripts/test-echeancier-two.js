@@ -14,6 +14,25 @@ const fs = require('fs');
 
 require('dotenv').config();
 
+const browsersDir = process.env.PLAYWRIGHT_BROWSERS_PATH;
+if (browsersDir) {
+  const abs = path.isAbsolute(browsersDir)
+    ? browsersDir
+    : path.join(__dirname, '..', browsersDir);
+  const ok =
+    fs.existsSync(abs) &&
+    fs.readdirSync(abs).some((n) => /chromium/i.test(n));
+  if (!ok) {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(
+      process.env.USERPROFILE || process.env.HOME || '',
+      'AppData',
+      'Local',
+      'ms-playwright'
+    );
+    console.log('Playwright: cache local vide, repli', process.env.PLAYWRIGHT_BROWSERS_PATH);
+  }
+}
+
 const boxplusEnv = path.join(__dirname, '..', '..', 'BOXPLUS', '.env');
 if (fs.existsSync(boxplusEnv)) {
   for (const line of fs.readFileSync(boxplusEnv, 'utf8').split('\n')) {
@@ -54,19 +73,20 @@ const { closeBrowser } = require('../bot/browser-pool');
   console.log({
     dry_run: process.env.ECHEANCIER_DRY_RUN,
     user: process.env.DECIPLUS_USER,
-    analyze_limit: 12,
-    cancel_limit: 2,
-    force_cancel: true,
+    analyze_limit: 80,
+    cancel_limit: 80,
+    force_cancel: false,
+    rule: '2 impayés d’affilée → résil ; 1 impayé → 10 relances',
   });
 
   const order = {
     order_id: `ECHEANCIER-TWO-${runId}`,
     action: 'echeancier',
-    limit: 12,
-    cancel_limit: 2,
-    force_cancel: true,
+    limit: 80,
+    cancel_limit: 80,
+    force_cancel: false,
     gym: 'minimes',
-    product_name: 'Scan échéancier 2 fiches',
+    product_name: 'Scan échéancier 2 impayés',
     requires_payment: false,
     requires_iban: false,
     sale_type: 'none',

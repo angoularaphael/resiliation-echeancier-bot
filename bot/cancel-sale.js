@@ -773,7 +773,18 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   // Étape essentielle : aperçu email → « Résilier le contrat et envoyer le mail »
   const mailed = await clickResilierEtEnvoyerMail(page);
   if (!mailed) {
-    return { cancelled: false, reason: 'resilier_envoyer_mail_missing', idc: contract.idc };
+    logWarn('Modale mail de résiliation absente — contrat déjà confirmé, on continue', {
+      idc: contract.idc,
+    });
+    return {
+      cancelled: true,
+      reason: 'ok_mail_skipped',
+      mode: 'resilier',
+      idc: contract.idc,
+      label: contract.label,
+      cancel_date: dateStr,
+      mail_skipped: true,
+    };
   }
 
   await randomDelay(800, 1200);
@@ -812,7 +823,7 @@ async function reopenMemberAfterCancel(page, memberId) {
   await randomDelay(600, 1000);
 }
 
-async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null } = {}) {
+async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null } = {}) {
   let total = 0;
   const details = [];
   const doneIds = new Set();
@@ -835,6 +846,15 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
 
     let contracts = await findActiveContracts(page);
     contracts = contracts.filter((c) => !doneIds.has(c.idc));
+    if (typeof filter === 'function') {
+      contracts = contracts.filter((c) => {
+        try {
+          return filter(c);
+        } catch {
+          return false;
+        }
+      });
+    }
 
     logInfo('Contrats actifs à résilier', {
       member_id: memberId,
@@ -879,17 +899,20 @@ async function cancelSale(page, memberId, options = {}) {
   if (!memberId) throw new Error('member_id requis pour résilier');
   const cancelDate = options.cancelDate || options.cancel_date || null;
   const cancelReason = String(options.cancelReason || options.cancel_reason || '').toLowerCase();
+  const extraFilter = typeof options.filter === 'function' ? options.filter : null;
+  const isOps =
+    cancelReason === 'change_to_comptant' ||
+    cancelReason.startsWith('change_') ||
+    /echeancier|impay/.test(cancelReason);
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
+    filter: extraFilter,
   });
   if (outcome.cancelled_count === 0) {
     const reason = outcome.details[0]?.reason || 'inconnu';
-    const isChange =
-      cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_');
-    // Changement d’abo : le but est la vente. Déjà résilié / panneau absent → on continue.
-    if (isChange) {
-      logInfo('Changement abo — résiliation non bloquante, on continue la vente', {
+    if (isOps) {
+      logInfo('Résiliation ops — rien à clôturer, on continue', {
         member_id: memberId,
         reason,
         detail_reasons: (outcome.details || []).map((d) => d.reason).filter(Boolean),

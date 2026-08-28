@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   classifyUnpaid,
   shouldCancel,
+  isTwoConsecutiveUnpaid,
   shouldSendReminder,
   shouldCountAttempt,
   currentYearMonth,
@@ -49,8 +50,8 @@ describe('echeancier-policy', () => {
     assert.equal(shouldCountAttempt({}, classified, { isRelance: false, now }), false);
   });
 
-  it('résilie à la 10e tentative si toujours impayé', () => {
-    const classified = classifyUnpaid({ unpaid_count: 2, months: ['2026-07', '2026-08'] }, now);
+  it('un seul impayé : résil seulement à la 10e tentative', () => {
+    const classified = classifyUnpaid({ unpaid_count: 1, months: ['2026-08'] }, now);
     assert.equal(shouldCancel({ attempt_count: 9 }, classified), false);
     assert.equal(shouldCancel({ attempt_count: 10 }, classified), true);
     assert.equal(maxAttempts(), 10);
@@ -58,6 +59,16 @@ describe('echeancier-policy', () => {
     assert.equal(remainingDays(10), 1);
     assert.equal(previousYearMonth(now), '2026-07');
     assert.equal(currentYearMonth(now), '2026-08');
+  });
+
+  it('2 impayés d’affilée (mois précédent + en cours) → résil tout de suite', () => {
+    const classified = classifyUnpaid(
+      { unpaid_count: 2, months: ['2026-07', '2026-08'] },
+      now
+    );
+    assert.equal(isTwoConsecutiveUnpaid(classified), true);
+    assert.equal(shouldCancel({}, classified), true);
+    assert.equal(shouldCancel({ attempt_count: 0 }, classified), true);
   });
 
   it('force cancel pour un test limité', () => {

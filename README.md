@@ -9,7 +9,8 @@ Gère :
 - encaissement CB Deciplus après paiement d’une relance (`action: encaisser`)
 - scan Manager → Échéancier → Impayés :
   - **un seul mail** de relance (vouvoiement + bouton de paiement)
-  - chaque jour à **17h** : une tentative ; à la **10e** si toujours impayé → résiliation
+  - **2 échéances impayées d’affilée** (mois précédent + mois en cours) → résiliation immédiate
+- 1 seul impayé : chaque jour à **17h** une tentative ; à la **10e** si toujours impayé → résiliation
   - Portet : paiement PayPal ; autres salles : PayPlug + PayPal
   - au démarrage : scan sans renvoyer de mail (sauf s’il est déjà 17h)
 
