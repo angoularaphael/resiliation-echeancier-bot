@@ -706,6 +706,10 @@ async function runEcheancierScan(
       if (!email) {
         noEmail += 1;
         row.no_email = true;
+        logInfo('Échéancier — mail absent, résiliation quand même', {
+          member_id: cand.member_id,
+          name: cand.name || null,
+        });
       }
 
       if (shouldCountAttempt(mem, classified, { isRelance })) {

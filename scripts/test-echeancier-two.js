@@ -73,8 +73,8 @@ const { closeBrowser } = require('../bot/browser-pool');
   console.log({
     dry_run: process.env.ECHEANCIER_DRY_RUN,
     user: process.env.DECIPLUS_USER,
-    analyze_limit: 80,
-    cancel_limit: 80,
+    analyze_limit: 120,
+    cancel_limit: 120,
     force_cancel: false,
     rule: '2 impayés d’affilée → résil ; 1 impayé → 10 relances',
   });
@@ -82,8 +82,8 @@ const { closeBrowser } = require('../bot/browser-pool');
   const order = {
     order_id: `ECHEANCIER-TWO-${runId}`,
     action: 'echeancier',
-    limit: 80,
-    cancel_limit: 80,
+    limit: 120,
+    cancel_limit: 120,
     force_cancel: false,
     gym: 'minimes',
     product_name: 'Scan échéancier 2 impayés',

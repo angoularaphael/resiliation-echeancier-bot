@@ -117,6 +117,16 @@ describe('echeancier-mail', () => {
   });
 });
 
+describe('echeancier-scan', () => {
+  it('mail absent n’empêche pas la résiliation 2 impayés', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../bot/echeancier-scan.js'), 'utf8');
+    assert.match(src, /mail absent, résiliation quand même/);
+    assert.doesNotMatch(src, /if \(!email\) \{\s*continue/s);
+  });
+});
+
 describe('echeancier-offer', () => {
   it('mappe 29 / 36 / 44', () => {
     assert.equal(mapOffer({ productName: 'OFFRE A 29,99€', amountCents: 2999 }).key, '29');
