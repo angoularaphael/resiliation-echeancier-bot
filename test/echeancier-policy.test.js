@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   classifyUnpaid,
+  classifySepaRemark,
   shouldCancel,
   isTwoConsecutiveUnpaid,
   shouldSendReminder,
@@ -13,6 +14,7 @@ const {
   maxAttempts,
   remainingDays,
   parisDayKey,
+  SEPA_REASON,
 } = require('../lib/echeancier-policy');
 const { reminderCopy } = require('../lib/echeancier-mail');
 const { mapOffer, eurosToCents } = require('../lib/echeancier-offer');
@@ -61,14 +63,92 @@ describe('echeancier-policy', () => {
     assert.equal(currentYearMonth(now), '2026-08');
   });
 
-  it('2 impayés d’affilée (mois précédent + en cours) → résil tout de suite', () => {
+  it('2 impayés d’affilée sans motif SEPA → pas de résil (AM04 attend 3)', () => {
     const classified = classifyUnpaid(
       { unpaid_count: 2, months: ['2026-07', '2026-08'] },
       now
     );
     assert.equal(isTwoConsecutiveUnpaid(classified), true);
-    assert.equal(shouldCancel({}, classified), true);
-    assert.equal(shouldCancel({ attempt_count: 0 }, classified), true);
+    assert.equal(shouldCancel({}, classified), false);
+    assert.equal(shouldCancel({ attempt_count: 0 }, classified), false);
+  });
+
+  it('AM04 provision insuffisante : skip jusqu’à 3 impayés', () => {
+    const one = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['AM04 Provision insuffisante'],
+    }, now);
+    assert.equal(one.onlyInsufficientFunds, true);
+    assert.equal(shouldCancel({}, one), false);
+    const two = classifyUnpaid({
+      unpaid_count: 2,
+      months: ['2026-07', '2026-08'],
+      remarks: ['AM04 Provision insuffisante', 'RETURNED fond insuffisant'],
+    }, now);
+    assert.equal(shouldCancel({}, two), false);
+    const three = classifyUnpaid({
+      unpaid_count: 3,
+      months: ['2026-06', '2026-07', '2026-08'],
+      remarks: ['AM04 Provision insuffisante'],
+    }, now);
+    assert.equal(shouldCancel({}, three), true);
+  });
+
+  it('AC01 coordonnées bancaires inexploitables → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['AC01 Coordonnee Bancaire inexploitable'],
+    }, now);
+    assert.equal(c.hasImmediateSepaReason, true);
+    assert.equal(shouldCancel({}, c), true);
+    assert.equal(classifySepaRemark('AC01 Coordonnée Bancaire inexploitable'), SEPA_REASON.BAD_BANK);
+  });
+
+  it('MD01 absence de mandat → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['MD01 Pas d’autorisation / Absence de mandat'],
+    }, now);
+    assert.equal(c.hasImmediateSepaReason, true);
+    assert.equal(shouldCancel({}, c), true);
+    assert.equal(classifySepaRemark('Absence de mandat'), SEPA_REASON.NO_MANDATE);
+  });
+
+  it('fiche sans e-mail ni téléphone → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['AM04 Provision insuffisante'],
+      email: '',
+      phone: '',
+    }, now);
+    assert.equal(shouldCancel({}, c), true);
+  });
+
+  it('MS02 refus débiteur / ordre client → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['MS02 Sur ordre du client / Refus du débiteur'],
+      status: 'failed',
+    }, now);
+    assert.equal(c.hasImmediateSepaReason, true);
+    assert.equal(shouldCancel({}, c), true);
+    assert.equal(classifySepaRemark('refus du débiteur'), SEPA_REASON.DEBTOR_REFUSAL);
+  });
+
+  it('Erreur JSON Syntax error → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['(Erreur JSON Syntax error)'],
+    }, now);
+    assert.equal(c.hasImmediateSepaReason, true);
+    assert.equal(shouldCancel({}, c), true);
+    assert.equal(classifySepaRemark('Erreur JSON Syntax error'), SEPA_REASON.JSON_ERROR);
   });
 
   it('force cancel pour un test limité', () => {
@@ -118,11 +198,12 @@ describe('echeancier-mail', () => {
 });
 
 describe('echeancier-scan', () => {
-  it('mail absent n’empêche pas la résiliation 2 impayés', () => {
+  it('mail absent n’empêche pas la résiliation', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../bot/echeancier-scan.js'), 'utf8');
     assert.match(src, /mail absent, résiliation quand même/);
+    assert.match(src, /AM04 \/ provision insuffisante → résil à 3 impayés/);
     assert.doesNotMatch(src, /if \(!email\) \{\s*continue/s);
   });
 });
