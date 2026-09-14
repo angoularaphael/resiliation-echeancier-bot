@@ -95,26 +95,61 @@ describe('echeancier-policy', () => {
     assert.equal(shouldCancel({}, three), true);
   });
 
-  it('AC01 coordonnées bancaires inexploitables → résil immédiat', () => {
-    const c = classifyUnpaid({
-      unpaid_count: 1,
-      months: ['2026-08'],
-      remarks: ['AC01 Coordonnee Bancaire inexploitable'],
-    }, now);
-    assert.equal(c.hasImmediateSepaReason, true);
-    assert.equal(shouldCancel({}, c), true);
-    assert.equal(classifySepaRemark('AC01 Coordonnée Bancaire inexploitable'), SEPA_REASON.BAD_BANK);
-  });
-
-  it('MD01 absence de mandat → résil immédiat', () => {
-    const c = classifyUnpaid({
+  it('MD01 absence de mandat → résil à 3 impayés', () => {
+    const one = classifyUnpaid({
       unpaid_count: 1,
       months: ['2026-08'],
       remarks: ['MD01 Pas d’autorisation / Absence de mandat'],
     }, now);
+    assert.equal(one.hasImmediateSepaReason, false);
+    assert.equal(shouldCancel({}, one), false);
+    const three = classifyUnpaid({
+      unpaid_count: 3,
+      months: ['2026-06', '2026-07', '2026-08'],
+      remarks: ['MD01 Pas d’autorisation / Absence de mandat'],
+    }, now);
+    assert.equal(shouldCancel({}, three), true);
+    assert.equal(classifySepaRemark('Absence de mandat'), SEPA_REASON.NO_MANDATE);
+  });
+
+  it('MD06 contestation débiteur → résil immédiat', () => {
+    const c = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['MD06 Contestation débiteur / Contestation d’une opération autorisée'],
+    }, now);
     assert.equal(c.hasImmediateSepaReason, true);
     assert.equal(shouldCancel({}, c), true);
-    assert.equal(classifySepaRemark('Absence de mandat'), SEPA_REASON.NO_MANDATE);
+  });
+
+  it('AC01 / RC01 → résil au 2e impayé', () => {
+    const one = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['AC01 Coordonnee Bancaire inexploitable'],
+    }, now);
+    assert.equal(shouldCancel({}, one), false);
+    const two = classifyUnpaid({
+      unpaid_count: 2,
+      months: ['2026-07', '2026-08'],
+      remarks: ['RC01 Code banque incorrect'],
+    }, now);
+    assert.equal(shouldCancel({}, two), true);
+  });
+
+  it('AC06 → résil au 2e impayé', () => {
+    const one = classifyUnpaid({
+      unpaid_count: 1,
+      months: ['2026-08'],
+      remarks: ['AC06 Opposition sur compte'],
+    }, now);
+    assert.equal(shouldCancel({}, one), false);
+    const two = classifyUnpaid({
+      unpaid_count: 2,
+      months: ['2026-07', '2026-08'],
+      remarks: ['AC06 Opposition sur compte'],
+    }, now);
+    assert.equal(shouldCancel({}, two), true);
   });
 
   it('fiche sans e-mail ni téléphone → résil immédiat', () => {
