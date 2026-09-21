@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Test : analyse puis résiliation de 2 impayés à la suite.
+ * Test : analyse puis résiliation selon motifs SEPA (AC01/MS02 immédiat, AM04 à 3).
  * LIVE par défaut (ECHEANCIER_DRY_RUN=1 pour lister seulement).
  *
  *   node scripts/test-echeancier-two.js
@@ -76,7 +76,7 @@ const { closeBrowser } = require('../bot/browser-pool');
     analyze_limit: 120,
     cancel_limit: 120,
     force_cancel: false,
-    rule: '2 impayés d’affilée → résil ; 1 impayé → 10 relances',
+    rule: '2 impayés consécutifs → résil ; MD06/MS02/JSON immédiat ; sinon 10 relances',
   });
 
   const order = {

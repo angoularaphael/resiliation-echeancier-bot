@@ -63,17 +63,16 @@ describe('echeancier-policy', () => {
     assert.equal(currentYearMonth(now), '2026-08');
   });
 
-  it('2 impayés d’affilée sans motif SEPA → pas de résil (AM04 attend 3)', () => {
+  it('2 impayés d’affilée → résil peu importe le motif', () => {
     const classified = classifyUnpaid(
       { unpaid_count: 2, months: ['2026-07', '2026-08'] },
       now
     );
     assert.equal(isTwoConsecutiveUnpaid(classified), true);
-    assert.equal(shouldCancel({}, classified), false);
-    assert.equal(shouldCancel({ attempt_count: 0 }, classified), false);
+    assert.equal(shouldCancel({}, classified), true);
   });
 
-  it('AM04 provision insuffisante : skip jusqu’à 3 impayés', () => {
+  it('AM04 provision insuffisante : 1 impayé wait, 2 consécutifs résil', () => {
     const one = classifyUnpaid({
       unpaid_count: 1,
       months: ['2026-08'],
@@ -86,16 +85,10 @@ describe('echeancier-policy', () => {
       months: ['2026-07', '2026-08'],
       remarks: ['AM04 Provision insuffisante', 'RETURNED fond insuffisant'],
     }, now);
-    assert.equal(shouldCancel({}, two), false);
-    const three = classifyUnpaid({
-      unpaid_count: 3,
-      months: ['2026-06', '2026-07', '2026-08'],
-      remarks: ['AM04 Provision insuffisante'],
-    }, now);
-    assert.equal(shouldCancel({}, three), true);
+    assert.equal(shouldCancel({}, two), true);
   });
 
-  it('MD01 absence de mandat → résil à 3 impayés', () => {
+  it('MD01 absence de mandat → résil à 2 impayés consécutifs', () => {
     const one = classifyUnpaid({
       unpaid_count: 1,
       months: ['2026-08'],
@@ -103,12 +96,12 @@ describe('echeancier-policy', () => {
     }, now);
     assert.equal(one.hasImmediateSepaReason, false);
     assert.equal(shouldCancel({}, one), false);
-    const three = classifyUnpaid({
-      unpaid_count: 3,
-      months: ['2026-06', '2026-07', '2026-08'],
+    const two = classifyUnpaid({
+      unpaid_count: 2,
+      months: ['2026-07', '2026-08'],
       remarks: ['MD01 Pas d’autorisation / Absence de mandat'],
     }, now);
-    assert.equal(shouldCancel({}, three), true);
+    assert.equal(shouldCancel({}, two), true);
     assert.equal(classifySepaRemark('Absence de mandat'), SEPA_REASON.NO_MANDATE);
   });
 
@@ -238,7 +231,7 @@ describe('echeancier-scan', () => {
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../bot/echeancier-scan.js'), 'utf8');
     assert.match(src, /mail absent, résiliation quand même/);
-    assert.match(src, /AM04 \/ provision insuffisante → résil à 3 impayés/);
+    assert.match(src, /2 impayés consécutifs → Résilier/);
     assert.doesNotMatch(src, /if \(!email\) \{\s*continue/s);
   });
 });

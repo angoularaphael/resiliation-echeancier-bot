@@ -7,10 +7,12 @@ Gère :
 - résiliations boutique (`action: cancel`)
 - vérif identité / changements d’abo
 - encaissement CB Deciplus après paiement d’une relance (`action: encaisser`)
-- scan Manager → Échéancier → Impayés :
-  - **un seul mail** de relance (vouvoiement + bouton de paiement)
-  - **2 échéances impayées d’affilée** (mois précédent + mois en cours) → résiliation immédiate
-- 1 seul impayé : chaque jour à **17h** une tentative ; à la **10e** si toujours impayé → résiliation
+- scan Manager → Échéancier → Impayés (lit le **Détail de l'échéance**) :
+  - **2 impayés consécutifs** → résiliation, **peu importe le motif** (tuile **Résilier**, jamais « Annuler la vente »)
+  - **MD06** / **MS02** / **MS03** / **AC04** / **JSON** → résiliation **immédiate**
+  - **AC01** / **RC01** → mail RIB au 1er impayé, résil au 2e
+  - **un seul mail** de relance (vouvoiement + bouton de paiement) pour les cas non immédiats
+- 1 seul impayé (AM04 / MD01 / inconnu) : chaque jour à **17h** une tentative ; à la **10e** si toujours impayé → résiliation
   - Portet : paiement PayPal ; autres salles : PayPlug + PayPal
   - au démarrage : scan sans renvoyer de mail (sauf s’il est déjà 17h)
 

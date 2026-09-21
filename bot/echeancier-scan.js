@@ -1,7 +1,10 @@
 /**
  * Scan Deciplus Manager → Échéancier → Impayés.
- * Un mail de relance (vouvoiement + lien de paiement) au premier passage 17h.
- * Chaque 17h = une tentative. À la 10e, si toujours impayé → résiliation.
+ * Motifs SEPA (Détail de l'échéance) :
+ *   2 impayés consécutifs → Résilier (jamais Annuler la vente), peu importe le motif
+ *   MD06 / MS02 / MS03 / AC04 / JSON → résil immédiat
+ * Un mail de relance (vouvoiement + lien de paiement) au premier passage 17h
+ * pour les cas non immédiats (ex. 1 seul AM04).
  */
 const { logInfo, logWarn } = require('../lib/logger');
 const { cancelSale } = require('./cancel-sale');
@@ -9,11 +12,13 @@ const { gotoDeciplus } = require('./auth');
 const {
   classifyUnpaid,
   shouldCancel,
-  isTwoConsecutiveUnpaid,
+  cancelWhy,
   shouldSendReminder,
   shouldCountAttempt,
   isRelanceRun,
   parisDayKey,
+  classifySepaRemark,
+  SEPA_REASON,
 } = require('../lib/echeancier-policy');
 const { loadState, saveState, touchMember } = require('../lib/echeancier-state');
 const { sendUnpaidReminder } = require('../lib/echeancier-mail');
@@ -267,7 +272,7 @@ async function parseUnpaidRows(page) {
     for (const tr of trs) {
       const text = (tr.innerText || '').replace(/\s+/g, ' ').trim();
       if (!text || text.length < 8) continue;
-      if (!/impay|non\s*pay|unpaid|échec|reject|retour/i.test(text)) continue;
+      if (!/impay|non\s*pay|unpaid|échec|reject|retour|returned|failed|AM04|AC01|MS02/i.test(text)) continue;
 
       const dateMatches = [...text.matchAll(/(\d{2})\/(\d{2})\/(\d{4})/g)];
       const dates = dateMatches.map((m) => ({
@@ -312,6 +317,7 @@ async function parseUnpaidRows(page) {
       name: row.name || '',
       unpaid_count: 0,
       samples: [],
+      remarks: [],
       dateKeys: new Set(),
       timestamps: [],
       email: '',
@@ -320,6 +326,9 @@ async function parseUnpaidRows(page) {
     if (!cur.member_id && row.member_id) cur.member_id = row.member_id;
     if (!cur.name && row.name) cur.name = row.name;
     if (cur.samples.length < 4) cur.samples.push(row.text);
+    if (row.text && classifySepaRemark(row.text) !== SEPA_REASON.UNKNOWN) {
+      pushUnique(cur.remarks, row.text);
+    }
     if (!cur.email && row.email) cur.email = row.email;
     for (const d of row.dates || []) {
       cur.dateKeys.add(d.key);
@@ -336,6 +345,7 @@ async function parseUnpaidRows(page) {
       name: cur.name || '',
       unpaid_count: cur.unpaid_count,
       samples: cur.samples,
+      remarks: cur.remarks || [],
       months: [...cur.dateKeys].sort(),
       timestamps: cur.timestamps,
       email: cur.email || '',
@@ -354,6 +364,7 @@ function mergeUnpaid(parts) {
       name: row.name || '',
       unpaid_count: 0,
       samples: [],
+      remarks: [],
       months: [],
       timestamps: [],
       email: '',
@@ -367,6 +378,7 @@ function mergeUnpaid(parts) {
     for (const s of row.samples || []) {
       if (cur.samples.length < 6 && !cur.samples.includes(s)) cur.samples.push(s);
     }
+    for (const rmk of row.remarks || []) pushUnique(cur.remarks, rmk);
     merged.set(key, cur);
   }
   return [...merged.values()];
@@ -376,30 +388,72 @@ function formatIsoDate(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function pushUnique(arr, value) {
+  const s = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!s || arr.includes(s)) return;
+  arr.push(s);
+}
+
+function extractRowRemarks(row) {
+  const out = [];
+  const walk = (obj, depth = 0) => {
+    if (obj == null || depth > 4) return;
+    if (typeof obj === 'string' || typeof obj === 'number') {
+      const s = String(obj);
+      if (
+        /\bAM04\b|\bAC01\b|\bMS02\b|provision|inexploit|refus du d|sur ordre du client|json\s*syntax|erreur json|fond(?:s)? insuffisant/i.test(
+          s
+        )
+      ) {
+        pushUnique(out, s);
+      }
+      return;
+    }
+    if (Array.isArray(obj)) {
+      for (const item of obj) walk(item, depth + 1);
+      return;
+    }
+    if (typeof obj !== 'object') return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (/remark|comment|message|reason|error|sepa|reject|return|status|info/i.test(k)) {
+        if (typeof v === 'string' || typeof v === 'number') pushUnique(out, v);
+        else walk(v, depth + 1);
+      }
+    }
+  };
+  walk(row);
+  const status = String(row.status || row.sepaStatus || row.paymentStatus || '').trim();
+  if (status) pushUnique(out, status);
+  return out;
+}
+
 function candidatesFromScheduleRows(rows) {
   const byMember = new Map();
   for (const r of rows || []) {
-    const memberId = String(r.memberId || r.member?.id || '');
+    const memberId = String(r.memberId || r.member?.id || r.idj || '');
     if (!memberId) continue;
-    const date = String(r.paymentDate || r.date || '').slice(0, 10);
+    const date = String(r.paymentDate || r.date || r.dueDate || '').slice(0, 10);
     const [y, m, d] = date.split('-').map(Number);
     if (!y || !m || !d) continue;
-    const name = [r.member?.name, r.member?.surname].filter(Boolean).join(' ').trim();
+    const name = [r.member?.name, r.member?.surname, r.memberName].filter(Boolean).join(' ').trim();
     const productName = String(r.product?.name || r.prestation || r.label || '').trim();
     const amountCents = eurosToCents(r.amountTTC ?? r.inclTax ?? r.priceTTC ?? r.amount ?? r.price ?? 0);
     const site =
       r.site?.name || r.siteName || r.clubName || r.zoneName || r.zone?.name || r.site || '';
+    const remarks = extractRowRemarks(r);
     const cur = byMember.get(memberId) || {
       member_id: memberId,
       name,
       unpaid_count: 0,
       samples: [],
+      remarks: [],
       dateKeys: new Set(),
       timestamps: [],
       email: '',
       product_name: '',
       amount_cents: 0,
       site: '',
+      schedule_ids: [],
     };
     cur.unpaid_count += 1;
     if (!cur.name && name) cur.name = name;
@@ -408,8 +462,13 @@ function candidatesFromScheduleRows(rows) {
     if (!cur.site && site) cur.site = String(site);
     cur.dateKeys.add(`${y}-${String(m).padStart(2, '0')}`);
     cur.timestamps.push(new Date(y, m - 1, d).getTime());
+    const sid = r.id || r.scheduleId || r.paymentScheduleId;
+    if (sid) cur.schedule_ids.push(sid);
+    for (const remark of remarks) pushUnique(cur.remarks, remark);
     if (cur.samples.length < 4) {
-      cur.samples.push(`${date} ${name} ${productName} ${r.status || 'unpaid'}`.trim());
+      cur.samples.push(
+        `${date} ${name} ${productName} ${r.status || 'unpaid'} ${remarks.slice(0, 2).join(' ')}`.trim()
+      );
     }
     byMember.set(memberId, cur);
   }
@@ -418,13 +477,28 @@ function candidatesFromScheduleRows(rows) {
     name: cur.name || '',
     unpaid_count: cur.unpaid_count,
     samples: cur.samples,
+    remarks: cur.remarks,
     months: [...cur.dateKeys].sort(),
     timestamps: cur.timestamps,
     email: cur.email || '',
     product_name: cur.product_name || '',
     amount_cents: cur.amount_cents || 0,
     gym: gymFromUnpaid({ site: cur.site, samples: cur.samples }),
+    schedule_ids: cur.schedule_ids,
   }));
+}
+
+function parseJsonSafe(text, label = 'payment-schedules') {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    logWarn('Échéancier — JSON Syntax error', {
+      label,
+      error: err.message,
+      snippet: String(text || '').slice(0, 180),
+    });
+    return null;
+  }
 }
 
 async function fetchPaymentSchedules(page, { fromIso, toIso, status = ['unpaid'] }) {
@@ -444,29 +518,25 @@ async function fetchPaymentSchedules(page, { fromIso, toIso, status = ['unpaid']
   }, url).catch(() => null);
 
   let payload = null;
-  if (evalRes?.ok) {
-    try {
-      payload = JSON.parse(evalRes.text);
-    } catch {
-      payload = null;
-    }
-  }
+  if (evalRes?.ok) payload = parseJsonSafe(evalRes.text, `fetch ${status.join(',')}`);
   if (!payload) {
     const res = await page.context().request.get(url);
-    if (!res.ok()) throw new Error(`payment-schedules HTTP ${res.status()}`);
-    payload = await res.json();
+    if (!res.ok()) throw new Error(`payment-schedules HTTP ${res.status()} (${status.join(',')})`);
+    payload = parseJsonSafe(await res.text(), `request ${status.join(',')}`);
   }
+  if (!payload) return { count: 0, rows: [] };
 
-  const rows = [...(payload.rows || [])];
+  const rows = [...(payload.rows || payload.data || [])];
   const total = Number(payload.count || rows.length);
   let pageNo = 2;
   while (rows.length < total && pageNo <= 10) {
     params.set('page', String(pageNo));
     const nextUrl = `https://api.deciplus.pro/staff/v1/payment-schedules?${params}`;
-    const next = await page.evaluate(async (u) => {
+    const nextText = await page.evaluate(async (u) => {
       const r = await fetch(u, { credentials: 'include' });
-      return r.ok ? await r.json() : null;
-    }, nextUrl).catch(() => null);
+      return r.ok ? await r.text() : '';
+    }, nextUrl).catch(() => '');
+    const next = nextText ? parseJsonSafe(nextText, `page ${pageNo}`) : null;
     if (!next?.rows?.length) break;
     rows.push(...next.rows);
     pageNo += 1;
@@ -474,37 +544,146 @@ async function fetchPaymentSchedules(page, { fromIso, toIso, status = ['unpaid']
   return { count: total, rows };
 }
 
+async function fetchScheduleDetailRemarks(page, scheduleId) {
+  if (!scheduleId) return [];
+  const urls = [
+    `https://api.deciplus.pro/staff/v1/payment-schedules/${scheduleId}`,
+    `https://api.deciplus.pro/staff/v1/payment-schedule/${scheduleId}`,
+  ];
+  for (const url of urls) {
+    const text = await page
+      .evaluate(async (u) => {
+        const r = await fetch(u, { credentials: 'include' });
+        return r.ok ? await r.text() : '';
+      }, url)
+      .catch(() => '');
+    const payload = text ? parseJsonSafe(text, `detail ${scheduleId}`) : null;
+    if (!payload) continue;
+    const row = payload.row || payload.data || payload.response || payload;
+    return extractRowRemarks(row);
+  }
+  return [];
+}
+
 async function collectUnpaidAcrossMonths(page) {
   const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const from = new Date(now.getFullYear(), now.getMonth() - 3, 1);
   const fromIso = formatIsoDate(from);
   const toIso = formatIsoDate(now);
-  const { count, rows } = await fetchPaymentSchedules(page, {
-    fromIso,
-    toIso,
-    status: ['unpaid'],
-  });
-  const merged = candidatesFromScheduleRows(rows);
+  const statusBatches = [['unpaid'], ['returned'], ['failed'], ['rejected']];
+  const allRows = [];
+  const seen = new Set();
+  for (const status of statusBatches) {
+    try {
+      const { rows } = await fetchPaymentSchedules(page, { fromIso, toIso, status });
+      for (const row of rows || []) {
+        const key = String(row.id || row.scheduleId || `${row.memberId}-${row.paymentDate}-${row.status}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        allRows.push(row);
+      }
+    } catch (err) {
+      logWarn('Échéancier — API status échoué', { status: status.join(','), error: err.message });
+    }
+  }
+  const merged = candidatesFromScheduleRows(allRows);
   merged.sort((a, b) => {
-    const score = (r) => (r.months || []).length * 10 + Number(r.unpaid_count || 0);
+    const score = (r) => {
+      const c = classifyUnpaid(r);
+      return (c.hasImmediateSepaReason ? 1000 : 0) + Number(r.unpaid_count || 0) * 10 + (r.months || []).length;
+    };
     return score(b) - score(a);
   });
-  const consecutive = merged.filter((r) => (r.months || []).length >= 2);
+  const immediate = merged.filter((r) => classifyUnpaid(r).hasImmediateSepaReason);
+  const three = merged.filter((r) => Number(r.unpaid_count || 0) >= 3);
   logInfo('Échéancier — API impayés', {
     from: fromIso,
     to: toIso,
-    rows: rows.length,
-    count,
+    rows: allRows.length,
     members: merged.length,
-    consecutive: consecutive.length,
-    sample: consecutive.slice(0, 8).map((r) => ({
+    sepa_immediate: immediate.length,
+    three_unpaid: three.length,
+    sample_keys: allRows[0] ? Object.keys(allRows[0]).slice(0, 20) : [],
+    sample: immediate.concat(three).slice(0, 8).map((r) => ({
       id: r.member_id,
       name: r.name,
       months: r.months,
       unpaid: r.unpaid_count,
+      remarks: (r.remarks || []).slice(0, 2),
     })),
   });
   return merged;
+}
+
+function scopesOf(page) {
+  return [page, ...(page.frames?.() || [])];
+}
+
+async function readEcheanceDetailModal(page) {
+  for (const ctx of scopesOf(page)) {
+    const text = await ctx
+      .evaluate(() => {
+        const nodes = [...document.querySelectorAll('div, table, form, section, .modal, .el-dialog')];
+        const hit = nodes.find((el) => {
+          const t = String(el.innerText || '');
+          return (
+            /D[ée]tail de l['’]éch[ée]ance/i.test(t) &&
+            /Remarques|Status|Id SEPA/i.test(t) &&
+            t.length < 5000
+          );
+        });
+        return hit ? String(hit.innerText || '') : '';
+      })
+      .catch(() => '');
+    if (text) return text;
+  }
+  return '';
+}
+
+async function closeEcheanceDetailModal(page) {
+  for (const ctx of scopesOf(page)) {
+    const ok = ctx.getByRole('button', { name: /^OK$/i }).first();
+    if ((await ok.count()) > 0 && (await ok.isVisible().catch(() => false))) {
+      await ok.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(250);
+      return;
+    }
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+}
+
+async function clickFirstDetailLink(page, nameHint = '') {
+  const hint = String(nameHint || '').trim().split(/\s+/)[0] || '';
+  for (const ctx of scopesOf(page)) {
+    const row = hint
+      ? ctx.locator('tr, [role="row"]').filter({ hasText: new RegExp(hint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first()
+      : ctx.locator('tr, [role="row"]').filter({ hasText: /detail|détail/i }).first();
+    const link = row.locator('a, button, span').filter({ hasText: /d[ée]tail/i }).first();
+    if ((await link.count()) > 0) {
+      await link.click({ force: true }).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+async function enrichCandidateRemarks(page, cand) {
+  const classified = classifyUnpaid(cand);
+  if (classified.hasImmediateSepaReason || Number(cand.unpaid_count || 0) >= 2) return cand;
+  cand.remarks = Array.isArray(cand.remarks) ? cand.remarks : [];
+  for (const sid of (cand.schedule_ids || []).slice(0, 3)) {
+    const extra = await fetchScheduleDetailRemarks(page, sid);
+    for (const r of extra) pushUnique(cand.remarks, r);
+    if (classifyUnpaid(cand).hasImmediateSepaReason) return cand;
+  }
+  const opened = await clickFirstDetailLink(page, cand.name);
+  if (opened) {
+    await page.waitForTimeout(700);
+    const modal = await readEcheanceDetailModal(page);
+    if (modal) pushUnique(cand.remarks, modal);
+    await closeEcheanceDetailModal(page);
+  }
+  return cand;
 }
 
 async function memberHasEligibleContract(page, memberId) {
@@ -621,25 +800,36 @@ async function runEcheancierScan(
   await gotoDeciplus(page).catch(() => {});
   await openEcheancierImpayes(page);
   const candidates = await collectUnpaidAcrossMonths(page);
-  const twoUnpaid = candidates.filter((c) => isTwoConsecutiveUnpaid(classifyUnpaid(c)));
+  let enrichBudget = Math.max(max * 2, 40);
+  for (const c of candidates) {
+    if (enrichBudget <= 0) break;
+    const cl = classifyUnpaid(c);
+    if (cl.hasImmediateSepaReason || Number(c.unpaid_count || 0) >= 2) continue;
+    await enrichCandidateRemarks(page, c).catch((err) => {
+      logWarn('Échéancier — détail échéance illisible', { member_id: c.member_id, error: err.message });
+    });
+    enrichBudget -= 1;
+  }
+  const dueNow = candidates.filter((c) => shouldCancel({}, classifyUnpaid(c)));
   const workIds = new Set();
   const work = [];
-  for (const c of twoUnpaid.concat(candidates)) {
+  for (const c of dueNow.concat(candidates)) {
     const id = String(c.member_id || c.name || '');
     if (!id || workIds.has(id)) continue;
-    if (work.length >= Math.max(max, twoUnpaid.length)) break;
+    if (work.length >= Math.max(max, dueNow.length)) break;
     workIds.add(id);
     work.push(c);
   }
   logInfo('Échéancier — impayés détectés', {
     count: candidates.length,
-    two_unpaid: twoUnpaid.length,
+    sepa_or_three: dueNow.length,
     will_process: work.length,
-    sample: twoUnpaid.slice(0, 8).map((c) => ({
+    sample: dueNow.slice(0, 8).map((c) => ({
       id: c.member_id,
       unpaid: c.unpaid_count,
       months: c.months,
       name: c.name,
+      reasons: classifyUnpaid(c).sepaReasons,
     })),
   });
 
@@ -659,6 +849,7 @@ async function runEcheancierScan(
       member_id: cand.member_id,
       unpaid_count: cand.unpaid_count,
       months: cand.months,
+      remarks: cand.remarks || [],
       classified,
     };
     try {
@@ -774,7 +965,7 @@ async function runEcheancierScan(
   }
   saveState(state);
 
-  logInfo('Échéancier — phase RÉSILIATION (2 impayés d’affilée, ou 10e relance)');
+  logInfo('Échéancier — phase RÉSILIATION (2 impayés consécutifs, Résilier pas Annuler la vente)');
   for (let i = 0; i < work.length; i += 1) {
     if (cancelled >= maxCancel) break;
     const cand = work[i];
@@ -790,10 +981,12 @@ async function runEcheancierScan(
     if (!due) {
       row.skipped = true;
       const attempts = Number(mem.attempt_count || 0);
-      row.reason = attempts > 0 ? `attente_tentative_${attempts}/10` : 'un_seul_impaye';
+      if (classified.onlyInsufficientFunds) row.reason = `am04_wait_two (${classified.unpaidCount}/2)`;
+      else row.reason = attempts > 0 ? `attente_tentative_${attempts}/10` : 'un_seul_impaye';
       if (attempts > 0 && attempts < 10) waitingAttempts += 1;
       continue;
     }
+    row.cancel_why = cancelWhy(classified);
     if (!row.eligible || !row.eligible.length) {
       row.skipped = true;
       row.reason = row.reason || 'no_eligible_contract';
@@ -818,6 +1011,8 @@ async function runEcheancierScan(
         name: cand.name || null,
         unpaid: cand.unpaid_count,
         months: cand.months,
+        why: row.cancel_why,
+        sepa: classified.sepaReasons,
         contracts: row.eligible,
       });
       const cancel = await cancelSale(page, cand.member_id, {
@@ -866,7 +1061,8 @@ async function runEcheancierScan(
   return {
     ok: true,
     candidates: candidates.length,
-    two_unpaid: twoUnpaid.length,
+    two_unpaid: dueNow.length,
+    sepa_or_three: dueNow.length,
     dry_run: isDry,
     cancelled,
     mailed_reminder: mailedReminder,

@@ -740,6 +740,10 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     await randomDelay(400, 700);
   }
 
+  await page.keyboard.press('Tab').catch(() => {});
+  await page.locator('body').click({ position: { x: 8, y: 8 } }).catch(() => {});
+  await randomDelay(400, 700);
+
   const applied = await clickAppliquerEtQuitter(page);
   if (!applied) {
     return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
