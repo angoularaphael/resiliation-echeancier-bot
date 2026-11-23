@@ -90,7 +90,7 @@ async function sendNewMemberAlertDirect(payload) {
     body: JSON.stringify({
       sender: {
         name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
-        email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+        email: process.env.BREVO_SENDER_EMAIL || 'contact@boxingcenter.fr',
       },
       to: [{ email: adminTo }],
       subject: `[Nouveau membre] ${payload.first_name || ''} ${payload.last_name || ''} — ${payload.order_id || ''}`.trim(),
@@ -261,7 +261,7 @@ async function processCancelJob(page, order) {
         body: JSON.stringify({
           sender: {
             name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
-            email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+            email: process.env.BREVO_SENDER_EMAIL || 'contact@boxingcenter.fr',
           },
           to: [{ email: identity.email }],
           subject: 'Résiliation — informations à vérifier — Boxing Center',
@@ -350,6 +350,43 @@ async function processCancelJob(page, order) {
       cancelReason: order.cancel_reason || null,
     });
     await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null, memberId });
+    try {
+      const cancelReason = String(order.cancel_reason || '').toLowerCase();
+      const email = String(identity.email || '').trim();
+      if (
+        email &&
+        !/@boxplus-test\.local$/i.test(email) &&
+        cancelReason !== 'change_to_comptant' &&
+        !cancelReason.startsWith('change_')
+      ) {
+        const { notifyMemberApp } = require('../lib/app-member-notice');
+        const rawDate = order.cancel_date || order.effective_date || null;
+        let dateFr = null;
+        if (rawDate) {
+          const s = String(rawDate).trim();
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) dateFr = s;
+          else {
+            const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (iso) dateFr = `${iso[3]}/${iso[2]}/${iso[1]}`;
+            else dateFr = s;
+          }
+        }
+        await notifyMemberApp({
+          eventId: `cancel-boutique:${order.order_id || memberId}`,
+          email,
+          kind: 'abonnement_resilie',
+          title: 'Abonnement résilié',
+          body: dateFr
+            ? `Ta demande de résiliation est prise en compte. Accès jusqu’au ${dateFr}.`
+            : 'Ta demande de résiliation est prise en compte. Accès jusqu’à la fin de la période déjà payée.',
+        });
+      }
+    } catch (err) {
+      logWarn('Avis app résiliation non envoyé', {
+        order_id: order.order_id,
+        error: err.message,
+      });
+    }
     return {
       status: STATUS.SUCCESS,
       action: 'cancel',
@@ -624,7 +661,7 @@ async function notifyMembershipChangeComplete(order, memberId) {
       body: JSON.stringify({
         sender: {
           name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
-          email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+          email: process.env.BREVO_SENDER_EMAIL || 'contact@boxingcenter.fr',
         },
         to: [{ email }],
         subject: 'Votre abonnement comptant est actif — Boxing Center',
